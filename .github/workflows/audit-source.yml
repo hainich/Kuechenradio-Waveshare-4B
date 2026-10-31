@@ -1,0 +1,42 @@
+name: Audit - Vollstaendiger Quellcode-Snapshot
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Verify and archive exact committed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > SOURCE_COMMIT.txt
+          git ls-files > SOURCE_FILELIST.txt
+          git archive --format=zip --output="$RUNNER_TEMP/Kuechenradio_GitHub_Quellcode.zip" HEAD
+          python3 - <<'PY'
+          import zipfile,subprocess
+          from pathlib import Path
+          p=Path(__import__('os').environ['RUNNER_TEMP'])/'Kuechenradio_GitHub_Quellcode.zip'
+          tracked=set(subprocess.check_output(['git','ls-files'],text=True).splitlines())
+          with zipfile.ZipFile(p) as z:
+              archived=set(z.namelist())
+              assert tracked == archived, (tracked-archived,archived-tracked)
+              assert z.testzip() is None
+              print('Verified files:',len(archived))
+          PY
+      - name: Upload exact GitHub source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kuechenradio-Quellcode-Audit
+          path: |
+            ${{ runner.temp }}/Kuechenradio_GitHub_Quellcode.zip
+            SOURCE_COMMIT.txt
+            SOURCE_FILELIST.txt
+          if-no-files-found: error
