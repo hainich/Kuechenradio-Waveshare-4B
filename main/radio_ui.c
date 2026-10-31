@@ -44,6 +44,13 @@ static void station_color(int i, bool active)
     lv_obj_set_style_border_width(s_btn[i], active ? 2 : 0, 0);
     lv_obj_set_style_border_color(s_btn[i], lv_color_hex(0x67E8F9), 0);
 }
+/* LVGL invalidates and redraws labels when their text is set. Avoid
+ * doing this twice per second for values that have not changed. */
+static void label_if_changed(lv_obj_t *label, const char *value)
+{
+    if (strcmp(lv_label_get_text(label), value) != 0) lv_label_set_text(label, value);
+}
+
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
@@ -52,7 +59,7 @@ static void refresh(lv_timer_t *timer)
     if (s_last_rev != radio_config_revision()) {
         s_last_rev = radio_config_revision();
         for (int i = 0; i < RADIO_PRESETS; ++i) {
-            lv_label_set_text(s_label[i], cfg.stations[i].name);
+            label_if_changed(s_label[i], cfg.stations[i].name);
         }
     }
     if (s_selected != cfg.station) {
@@ -63,18 +70,26 @@ static void refresh(lv_timer_t *timer)
         s_playing = cfg.playing;
         lv_label_set_text(s_play_label, cfg.playing ? "II" : "> ");
     }
-    lv_label_set_text(s_title, cfg.stations[cfg.station].name);
+    label_if_changed(s_title, cfg.stations[cfg.station].name);
     if (!lv_obj_has_state(s_slider, LV_STATE_PRESSED)) {
-        lv_slider_set_value(s_slider, cfg.volume, LV_ANIM_OFF);
+        if (lv_slider_get_value(s_slider) != cfg.volume) {
+            lv_slider_set_value(s_slider, cfg.volume, LV_ANIM_OFF);
+        }
     }
-    lv_label_set_text(s_status, radio_stream_status());
+    if (radio_wifi_connected()) {
+        label_if_changed(s_status, radio_stream_status());
+    } else {
+        char wifi_state[96];
+        radio_wifi_diagnostic(wifi_state, sizeof(wifi_state));
+        label_if_changed(s_status, wifi_state);
+    }
     time_t now = time(NULL);
     struct tm t;
     localtime_r(&now, &t);
     char clock_text[12];
     if (t.tm_year > 120) strftime(clock_text, sizeof(clock_text), "%H:%M", &t);
     else snprintf(clock_text, sizeof(clock_text), "--:--");
-    lv_label_set_text(s_clock, clock_text);
+    label_if_changed(s_clock, clock_text);
 }
 void radio_ui_start(void)
 {
@@ -152,11 +167,11 @@ void radio_ui_start(void)
 
     radio_settings_t cfg;
     radio_config_get(&cfg);
-    s_selected = cfg.station;
+    s_selected = -1;
     s_playing = cfg.playing;
     lv_label_set_text(s_play_label, cfg.playing ? "II" : ">");
     s_last_rev = 0;
     refresh(NULL);
-    lv_timer_create(refresh, 500, NULL);
+    lv_timer_create(refresh, 1000, NULL);
     bsp_display_unlock();
 }
