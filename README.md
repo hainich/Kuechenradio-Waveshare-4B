@@ -1,3 +1,7 @@
+# Projektstatus: Firmware-Build erfolgreich
+
+[Einfach flashen](FLASHEN.md) · [GitHub Actions](https://github.com/hainich/Kuechenradio-Waveshare-4B/actions)
+
 # Küchenradio – Waveshare ESP32-S3-Touch-LCD-4B
 
 **Eigenständiger ESP-IDF-Quellcode, ohne AtlasCube-Bibliotheken**
@@ -35,7 +39,7 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 Unter Windows: ESP-IDF-5.5-Konsole starten und `build_windows.bat` ausführen; anschließend `idf.py -p COMx flash monitor`.
 
-Das Projekt enthält außerdem einen **GitHub-Actions-Buildworkflow**, mit dem die Firmware nach dem Hochladen des Projektordners automatisch kompiliert werden kann. Der Buildworkflow ist bislang nicht ausgeführt worden. Eine vollständige C-API-Prüfung gegen das echte SDK und der Firmware-Build stehen noch aus. Die verwendete LVGL-Version ist fest auf **9.3.0** gepinnt; die getestete API-Konstante `LV_LABEL_LONG_MODE_DOTS` wird verwendet.
+Das Projekt enthält außerdem einen **GitHub-Actions-Buildworkflow**, mit dem die Firmware nach dem Hochladen des Projektordners automatisch kompiliert werden kann. Der komplette Firmware-Build wurde am 31.10.2026 auf GitHub Actions erfolgreich durchgeführt. Die Hardwarefunktion ist noch nicht getestet. Siehe [FLASHEN.md](FLASHEN.md). Die verwendete LVGL-Version ist fest auf **9.3.0** gepinnt; die getestete API-Konstante `LV_LABEL_LONG_MODE_DOTS` wird verwendet.
 
 ## Projektstruktur
 
@@ -64,18 +68,13 @@ Der hardwareseitige Abnahmeplan steht in `HARDWARE_TESTPLAN.md`.
 
 - Die **kompletten selbst geschriebenen Anwendungsquelltexte** und die Baukonfiguration sind vorhanden.
 - Der **portable Formularparser einschließlich Prozentkodierung, HTML-Escaping und Grenzfällen wurde mit gcc und `-Wall -Wextra -Werror` erfolgreich getestet** (`tests/run.sh`).
-- **Der vollständige ESP-IDF-Build und ein Hardwaretest konnten in dieser Ausführungsumgebung nicht durchgeführt werden:** Es gibt hier weder die ESP-IDF-Toolchain noch Netzwerkzugriff zum Laden der Abhängigkeiten. Deshalb wird **keine installierbare Firmware und keine bestätigte Funktion behauptet**.
+- **GitHub Actions hat den vollständigen ESP-IDF-Build erfolgreich ausgeführt und die Firmwaredateien als Artefakt bereitgestellt. Der Hardwaretest ist weiterhin offen.**
 - Direkt-Stream-URLs für MP3 sind vorgesehen; AAC ist bewusst nicht eingebaut, damit keine proprietären Codec-Bibliotheken benötigt werden. **HLS (`.m3u8`), Playlists (`.m3u`/`.pls`), DRM-Streams, Podcasts und Bluetooth-Audio** sind nicht implementiert.
 - Die interne Audioausgabe ist mono. Bei Stereo-Streams werden beide Kanäle gemittelt.
 - Die Anzeige von Metadaten (Interpret/Titel via ICY) ist nicht integriert; es erscheint der Sendername.
 - Bei bestimmten Streamservern können zusätzliche HTTP-Header oder nicht standardkonforme Antworten Anpassungen erfordern.
 
-**Nächster technischer Meilenstein:** ESP-IDF-Build mit den registrierten Abhängigkeiten, anschließend Funktionsprüfung des ES8311 und des LCD auf deinem tatsächlichen Waveshare-4B. Die Datei sollte erst nach einem erfolgreichen Build geflasht werden.
+**Nächster technischer Meilenstein:** Flashen gemäß [FLASHEN.md](FLASHEN.md) und Hardware-Abnahme.
 
 **Quelloffenheit:** Die komplette selbst entwickelte Radio-Anwendung samt MP3-Decoder ist offen. ESP-IDF/WLAN und die Hardware-Treiber von Waveshare bleiben Hersteller-Komponenten; diese können ihrerseits herstellerspezifische Firmware-Blobs enthalten. „Vollständig quelloffen“ bezieht sich hier auf die Radiologik und den Audio-Decoder, nicht auf jeden Chip-/SDK-Firmwarebestandteil.
 
-## Übergabe an GitHub
-
-Die GitHub-Verbindung zu ChatGPT ist vorhanden, das Konto `hainich` enthielt bei der Prüfung am 31.10.2026 jedoch **noch kein Repository**. Die GitHub-Verbindung bietet aktuell kein `create_repository`-Kommando.
-
-Einmalig im Browser unter https://github.com/new ein **privates** Repository namens `Kuechenradio-Waveshare-4B` anlegen und **README hinzufügen** aktivieren (damit ein initialer Commit vorhanden ist). Danach kann ChatGPT die Dateien mit GitHub-Repositorywerkzeugen hochladen und die automatischen Builds sowie deren Protokolle auswerten.
