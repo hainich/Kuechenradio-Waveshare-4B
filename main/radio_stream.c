@@ -12,6 +12,8 @@
 #include <strings.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -30,6 +32,9 @@
 #define AUDIO_INPUT_CAPACITY 12288
 #define AUDIO_READ_SIZE 1536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
+#define AUDIO_FIFO_CAPACITY (64 * 1024)
+#define AUDIO_START_BUFFER (16 * 1024)
+#define AUDIO_REBUFFER (4 * 1024)
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -121,6 +126,89 @@ static bool wanted(uint32_t revision)
     return radio_wifi_connected() && radio_config_revision() == revision;
 }
 
+/*
+ * HTTP reception and MP3 playback must run independently: a blocking I2S
+ * write must not prevent the TCP receiver from reading the next MP3 bytes.
+ * Keep the compressed 64-KiB FIFO in PSRAM; the mutex only protects the
+ * ring indices and short copies. No audio I/O occurs under the mutex.
+ */
+typedef struct {
+    uint8_t *data;
+    size_t head;
+    size_t tail;
+    size_t used;
+    SemaphoreHandle_t mu;
+    SemaphoreHandle_t finished;
+    esp_http_client_handle_t http;
+    uint32_t revision;
+    atomic_bool stop;
+    atomic_bool eof;
+} audio_fifo_t;
+
+static size_t fifo_count(audio_fifo_t *fifo)
+{
+    xSemaphoreTake(fifo->mu, portMAX_DELAY);
+    size_t used = fifo->used;
+    xSemaphoreGive(fifo->mu);
+    return used;
+}
+
+static size_t fifo_write(audio_fifo_t *fifo, const uint8_t *data, size_t count)
+{
+    xSemaphoreTake(fifo->mu, portMAX_DELAY);
+    size_t free_bytes = AUDIO_FIFO_CAPACITY - fifo->used;
+    if (count > free_bytes) count = free_bytes;
+    size_t first = AUDIO_FIFO_CAPACITY - fifo->head;
+    if (first > count) first = count;
+    memcpy(fifo->data + fifo->head, data, first);
+    memcpy(fifo->data, data + first, count - first);
+    fifo->head = (fifo->head + count) % AUDIO_FIFO_CAPACITY;
+    fifo->used += count;
+    xSemaphoreGive(fifo->mu);
+    return count;
+}
+
+static size_t fifo_read(audio_fifo_t *fifo, uint8_t *data, size_t count)
+{
+    xSemaphoreTake(fifo->mu, portMAX_DELAY);
+    if (count > fifo->used) count = fifo->used;
+    size_t first = AUDIO_FIFO_CAPACITY - fifo->tail;
+    if (first > count) first = count;
+    memcpy(data, fifo->data + fifo->tail, first);
+    memcpy(data + first, fifo->data, count - first);
+    fifo->tail = (fifo->tail + count) % AUDIO_FIFO_CAPACITY;
+    fifo->used -= count;
+    xSemaphoreGive(fifo->mu);
+    return count;
+}
+
+static void receive_task(void *arg)
+{
+    audio_fifo_t *fifo = (audio_fifo_t *)arg;
+    uint8_t packet[2048];
+    while (!atomic_load(&fifo->stop) && wanted(fifo->revision)) {
+        /* Backpressure: never drop bytes from an MP3 frame. */
+        if (AUDIO_FIFO_CAPACITY - fifo_count(fifo) < sizeof(packet)) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        int n = esp_http_client_read(fifo->http, (char *)packet, sizeof(packet));
+        if (n <= 0) {
+            ESP_LOGW(TAG, "HTTP stream ended / read timed out: %d", n);
+            break;
+        }
+        size_t sent = 0;
+        while (sent < (size_t)n && !atomic_load(&fifo->stop) && wanted(fifo->revision)) {
+            size_t written = fifo_write(fifo, packet + sent, (size_t)n - sent);
+            sent += written;
+            if (written == 0) vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    atomic_store(&fifo->eof, true);
+    xSemaphoreGive(fifo->finished);
+    vTaskDelete(NULL);
+}
+
 static void play_stream(const char *url, uint32_t revision)
 {
     esp_http_client_handle_t http = open_stream(url);
@@ -129,44 +217,76 @@ static void play_stream(const char *url, uint32_t revision)
         return;
     }
 
-    /* For MP3, a frame is 1152 PCM samples per channel at most. */
     uint8_t *encoded = malloc(AUDIO_INPUT_CAPACITY);
     mp3d_sample_t *pcm = malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t));
     int16_t *mono = malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t));
     mp3dec_t *decoder = malloc(sizeof(mp3dec_t));
+    audio_fifo_t fifo = { .http = http, .revision = revision };
+    bool producer_started = false;
     bool opened = false;
     int active_rate = 0;
     int volume_applied = -1;
-    if (!encoded || !pcm || !mono || !decoder) {
-        status_set("Zu wenig RAM fuer Audio");
+    fifo.data = heap_caps_malloc(AUDIO_FIFO_CAPACITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    fifo.mu = xSemaphoreCreateMutex();
+    fifo.finished = xSemaphoreCreateBinary();
+    atomic_init(&fifo.stop, false);
+    atomic_init(&fifo.eof, false);
+    if (!encoded || !pcm || !mono || !decoder || !fifo.data || !fifo.mu || !fifo.finished) {
+        status_set("Zu wenig RAM fuer Audiopuffer");
         goto done;
     }
     mp3dec_init(decoder);
-    status_set("Verbinde Audiostream ...");
+    if (xTaskCreatePinnedToCore(receive_task, "radio_http", 6144, &fifo, 4, NULL, 0) != pdPASS) {
+        status_set("HTTP-Empfang konnte nicht starten");
+        goto done;
+    }
+    producer_started = true;
+
+    /* Build up roughly one second of compressed audio before playback. */
+    status_set("Puffert Audiostream ...");
+    while (wanted(revision) && !atomic_load(&fifo.eof) && fifo_count(&fifo) < AUDIO_START_BUFFER) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     int pending = 0;
+    bool buffering = false;
     while (wanted(revision)) {
         if (pending + AUDIO_READ_SIZE > AUDIO_INPUT_CAPACITY) {
             ESP_LOGW(TAG, "MP3 frame synchronization lost");
             status_set("Ungueltiger MP3-Stream");
             break;
         }
-        int n = esp_http_client_read(http, (char *)encoded + pending, AUDIO_READ_SIZE);
+        if (fifo_count(&fifo) == 0) {
+            if (atomic_load(&fifo.eof)) break;
+            if (!buffering) {
+                status_set("Puffert Audiostream ...");
+                buffering = true;
+                ESP_LOGW(TAG, "Audio FIFO underrun");
+            }
+            while (wanted(revision) && !atomic_load(&fifo.eof) &&
+                   fifo_count(&fifo) < AUDIO_REBUFFER) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (!wanted(revision)) break;
+            if (fifo_count(&fifo) == 0 && atomic_load(&fifo.eof)) break;
+        }
+        int n = (int)fifo_read(&fifo, encoded + pending, AUDIO_READ_SIZE);
         if (n <= 0) {
-            ESP_LOGW(TAG, "Stream Ende/Timeout: %d", n);
-            break;
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
         }
         pending += n;
         int offset = 0;
         while (pending - offset > 0 && wanted(revision)) {
             mp3dec_frame_info_t info = {0};
             int samples = mp3dec_decode_frame(decoder, encoded + offset, pending - offset, pcm, &info);
-            if (info.frame_bytes == 0) break;  /* Need more input. */
+            if (info.frame_bytes == 0) break;
             if (info.frame_bytes > pending - offset) {
                 ESP_LOGE(TAG, "Decoder frame larger than buffer");
                 goto done;
             }
             offset += info.frame_bytes;
-            if (samples <= 0) continue;  /* Skipped ID3/junk/frame without audio. */
+            if (samples <= 0) continue;
             if (samples > MINIMP3_MAX_SAMPLES_PER_FRAME / 2 ||
                 (info.channels != 1 && info.channels != 2) ||
                 info.hz < 8000 || info.hz > 48000) {
@@ -194,7 +314,10 @@ static void play_stream(const char *url, uint32_t revision)
                 active_rate = info.hz;
                 volume_applied = -1;
                 status_set("Spielt");
+            } else if (buffering) {
+                status_set("Spielt");
             }
+            buffering = false;
             radio_settings_t settings;
             radio_config_get(&settings);
             if (volume_applied != settings.volume) {
@@ -219,8 +342,16 @@ static void play_stream(const char *url, uint32_t revision)
     }
 
 done:
+    if (producer_started) {
+        atomic_store(&fifo.stop, true);
+        /* The receiver owns the HTTP handle until it has exited. */
+        xSemaphoreTake(fifo.finished, portMAX_DELAY);
+    }
     if (opened) esp_codec_dev_close(s_speaker);
     if (http) esp_http_client_cleanup(http);
+    if (fifo.finished) vSemaphoreDelete(fifo.finished);
+    if (fifo.mu) vSemaphoreDelete(fifo.mu);
+    free(fifo.data);
     free(encoded);
     free(pcm);
     free(mono);
