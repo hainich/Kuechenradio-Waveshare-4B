@@ -12,49 +12,90 @@
 #include "freertos/task.h"
 
 static const char *TAG = "radio_web";
-static void emit(httpd_req_t *req, const char *text)
+/* Build the complete setup page before sending it.  The previous version
+ * sent dozens of tiny HTTP chunks and ignored transmission errors, which could
+ * leave browsers displaying only the first part of the form. */
+static bool page_append(char *page, size_t capacity, size_t *used, const char *text)
 {
-    httpd_resp_sendstr_chunk(req, text);
+    size_t n = strlen(text);
+    if (*used >= capacity || n >= capacity - *used) return false;
+    memcpy(page + *used, text, n);
+    *used += n;
+    page[*used] = '\0';
+    return true;
 }
+
 static esp_err_t home_get(httpd_req_t *req)
 {
     radio_settings_t cfg;
     radio_config_get(&cfg);
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    emit(req, "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
-              "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-              "<title>Kuechenradio</title><style>body{font:16px system-ui,sans-serif;"
-              "background:#0b1422;color:#eef2f7;max-width:700px;margin:24px auto;padding:12px}"
-              "h1{color:#67e8f9}label{display:block;margin:16px 0 5px}"
-              "input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #475569;"
-              "background:#1e293b;color:white;border-radius:8px}button{background:#0f766e;"
-              "color:white;border:0;border-radius:8px;padding:15px 22px;margin:24px 0;font-size:18px}"
-              ".box{padding:12px;background:#172338;border-radius:10px;margin:12px 0}"
-              "small{color:#94a3b8}</style></head><body><h1>Kuechenradio</h1>"
-              "<p>WLAN und Lieblingssender konfigurieren. Nach Speichern startet das Radio neu.</p>"
-              "<form method='post' action='/save'>");
-    char escaped[1024];
-    emit(req, "<label>WLAN-Name (SSID)</label><input name='ssid' maxlength='32' value=\"");
-    html_escape(cfg.ssid, escaped, sizeof(escaped)); emit(req, escaped);
-    emit(req, "\" required><label>WLAN-Passwort</label><input name='pass' type='password' "
-              "maxlength='64' placeholder='Leer lassen, um bisheriges Passwort beizubehalten'>");
-    for (int i = 0; i < RADIO_PRESETS; ++i) {
-        char line[128];
-        snprintf(line, sizeof(line), "<div class='box'><strong>Sendertaste %d</strong>", i + 1);
-        emit(req, line);
-        snprintf(line, sizeof(line), "<label>Name</label><input name='name%d' maxlength='39' value=\"", i);
-        emit(req, line);
-        html_escape(cfg.stations[i].name, escaped, sizeof(escaped)); emit(req, escaped);
-        snprintf(line, sizeof(line), "\"><label>Stream-URL (MP3)</label><input name='url%d' maxlength='319' value=\"", i);
-        emit(req, line);
-        html_escape(cfg.stations[i].url, escaped, sizeof(escaped)); emit(req, escaped);
-        emit(req, "\"></div>");
+
+    const size_t capacity = 24576;
+    char *page = malloc(capacity);
+    if (!page) {
+        ESP_LOGE(TAG, "Kein Speicher fuer Setup-Seite");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
     }
-    emit(req, "<button type='submit'>Speichern und neu starten</button></form>"
-              "<small>Setup-WLAN: Kuechenradio-Setup / Passwort: Kuechenradio123. "
-              "Einstellungen im Heimnetz ueber die IP-Adresse des Displays.</small></body></html>");
-    return httpd_resp_sendstr_chunk(req, NULL);
+    size_t used = 0;
+    page[0] = '\0';
+    char escaped[2048];
+    char line[160];
+
+#define ADD(text) do { if (!page_append(page, capacity, &used, (text))) goto too_large; } while (0)
+
+    ADD("<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Kuechenradio</title><style>body{font:16px system-ui,sans-serif;"
+        "background:#0b1422;color:#eef2f7;max-width:700px;margin:24px auto;padding:12px}"
+        "h1{color:#67e8f9}label{display:block;margin:16px 0 5px}"
+        "input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #475569;"
+        "background:#1e293b;color:white;border-radius:8px}button{background:#0f766e;"
+        "color:white;border:0;border-radius:8px;padding:15px 22px;margin:24px 0;font-size:18px}"
+        ".box{padding:12px;background:#172338;border-radius:10px;margin:12px 0}"
+        "small{color:#94a3b8}</style></head><body><h1>Kuechenradio</h1>"
+        "<p>WLAN und Lieblingssender konfigurieren. Nach Speichern startet das Radio neu.</p>"
+        "<form method='post' action='/save'>");
+    ADD("<label>WLAN-Name (SSID)</label><input name='ssid' maxlength='32' value=\"");
+    html_escape(cfg.ssid, escaped, sizeof(escaped));
+    ADD(escaped);
+    ADD("\" required><label>WLAN-Passwort</label><input name='pass' type='password' "
+        "maxlength='64' placeholder='Leer lassen, um bisheriges Passwort beizubehalten'>");
+
+    for (int i = 0; i < RADIO_PRESETS; ++i) {
+        snprintf(line, sizeof(line), "<div class='box'><strong>Sendertaste %d</strong>", i + 1);
+        ADD(line);
+        snprintf(line, sizeof(line), "<label>Name</label><input name='name%d' maxlength='39' value=\"", i);
+        ADD(line);
+        html_escape(cfg.stations[i].name, escaped, sizeof(escaped));
+        ADD(escaped);
+        snprintf(line, sizeof(line), "\"><label>Stream-URL (MP3)</label><input name='url%d' maxlength='319' value=\"", i);
+        ADD(line);
+        html_escape(cfg.stations[i].url, escaped, sizeof(escaped));
+        ADD(escaped);
+        ADD("\"></div>");
+    }
+    ADD("<button type='submit'>Speichern und neu starten</button></form>"
+        "<small>Setup-WLAN: Kuechenradio-Setup / Passwort: Kuechenradio123. "
+        "Einstellungen im Heimnetz ueber die IP-Adresse des Displays.</small></body></html>");
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    esp_err_t result = httpd_resp_send(req, page, used);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Setup-Seite: HTTP-Uebertragung fehlgeschlagen: %s", esp_err_to_name(result));
+    } else {
+        ESP_LOGI(TAG, "Setup-Seite vollstaendig gesendet: %u Bytes", (unsigned)used);
+    }
+    free(page);
+    return result;
+
+too_large:
+    ESP_LOGE(TAG, "Setup-Seite zu gross (Kapazitaet %u Bytes)", (unsigned)capacity);
+    free(page);
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+#undef ADD
 }
 
 static void reboot_task(void *arg)
