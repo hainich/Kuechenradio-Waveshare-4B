@@ -1,28 +1,32 @@
-# Installationsanleitung – Waveshare ESP32-S3-Touch-LCD-4B
+# Firmware installieren – Waveshare ESP32-S3-Touch-LCD-4B
 
-**Nur für das exakte Modell mit „4B“!** Die Firmware ist unter ESP-IDF 5.5.5 erfolgreich kompiliert, aber noch nicht auf einem physischen Waveshare getestet.
+**Wichtig: Für normale Updates nur die Anwendungsdatei bei Adresse `0x10000` flashen. Nur so bleiben die gespeicherten WLAN-Einstellungen (NVS) erhalten.**
 
-## Windows / Chrome oder Edge
-1. Im [GitHub-Actions-Verlauf](https://github.com/hainich/Kuechenradio-Waveshare-4B/actions) den neuesten erfolgreichen (grünen) Workflow öffnen und unter **Artifacts** das Paket **Kuechenradio-Waveshare-4B-Firmware** herunterladen.
-2. ZIP entpacken. Datei **Kuechenradio_4B_Flash_0x0.bin** bereitlegen.
-3. Waveshare mit einem USB-**Datenkabel** verbinden.
-4. Offiziellen [Espressif-Web-Flasher](https://espressif.github.io/esptool-js/) in Chrome oder Edge öffnen, COM-Port auswählen, **Connect**.
-5. Unter **Program** die Binärdatei eintragen, Adresse **0x0**. Flash Mode **DIO**, Frequency **80m**, Flash Size **16MB**. **Erase all** nicht aktivieren, wenn vorhandene NVS-Einstellungen erhalten bleiben sollen.
-6. **Program** drücken, Erfolgsmeldung prüfen, Gerät neu starten. Falls es nicht erkannt wird, beim Verbinden ggf. BOOT gedrückt halten.
+## Firmware herunterladen
 
-Alternative für Nutzer mit Python und \`esptool\`:
+1. Auf [GitHub Actions](https://github.com/hainich/Kuechenradio-Waveshare-4B/actions) den neuesten erfolgreichen Build öffnen.
+2. Unter **Artifacts** `Kuechenradio-Waveshare-4B-Firmware` herunterladen und entpacken.
+3. Für Updates die Datei `Kuechenradio_UPDATE_0x10000.bin` auswählen.
 
-\`\`\`powershell
-py -m pip install esptool
-py -m esptool --chip esp32s3 --port COM5 --baud 460800 write-flash 0x0 Kuechenradio_4B_Flash_0x0.bin
-\`\`\`
+## Update ohne Verlust der Einstellungen (Windows / Chrome / Edge)
 
-**COM5 ist nur ein Beispiel.** Den tatsächlich angezeigten COM-Port verwenden.
+1. Waveshare mit einem USB-Datenkabel an den USB-to-UART-Anschluss anschließen.
+2. [Espressif Web-Flasher](https://espressif.github.io/esptool-js/) öffnen und **Connect**.
+3. **Program:** `Kuechenradio_UPDATE_0x10000.bin`, Adresse **`0x10000`**.
+4. Flash Mode **DIO**, Frequency **80m**, Flash Size **16MB**.
+5. **Erase all deaktiviert lassen**. Program drücken und danach neu starten.
 
-## Ersteinrichtung
-- WLAN **Kuechenradio-Setup** (Passwort **Kuechenradio123**) verbinden.
-- **http://192.168.4.1/** öffnen; Heim-WLAN und MP3-Sender speichern.
-- Lautsprecher: **8 Ohm / 2 Watt**, an der vorgesehenen Waveshare-Buchse.
-- Bei Problemen zuerst den seriellen Start-/Fehlerlog ansehen und die Tests in [HARDWARE_TESTPLAN.md](HARDWARE_TESTPLAN.md) durchgehen.
+Der Update-Vorgang schreibt nur die App-Partition. Die NVS-Partition liegt bei `0x9000–0xEFFF` und wird dabei nicht beschrieben.
 
-Die Gesamtdatei enthält Bootloader, Partitionstabelle und Anwendung an den vom ESP-IDF-Build vorgegebenen Adressen. Sie wird bei jedem Build bytegenau gegen die Einzeldateien geprüft.
+## Neuinstallation / Wiederherstellung
+
+Nur wenn Bootloader und Partitionstabelle neu installiert werden müssen: `Kuechenradio_FACTORY_RESET_0x0.bin` an Adresse `0x0` flashen.
+
+**ACHTUNG: Dieses vollständige Flash-Image überschreibt auch die NVS-Partition und löscht damit gespeicherte WLAN-Zugangsdaten, Sender und Einstellungen – selbst wenn „Erase all“ deaktiviert ist.** Das liegt daran, dass das kombinierte Image den NVS-Bereich mit `0xFF` auffüllt und der Flashvorgang die betreffenden Sektoren löscht.
+
+## WLAN nach Neuinstallation einrichten
+
+- WLAN `Kuechenradio-Setup` auswählen, Passwort `Kuechenradio123`.
+- Im Browser `http://192.168.4.1/` öffnen, Heim-WLAN-Daten eingeben und speichern.
+
+Die Firmware ist für das Modell **ESP32-S3-Touch-LCD-4B** vorgesehen.
