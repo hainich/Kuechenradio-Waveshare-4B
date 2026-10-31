@@ -20,6 +20,12 @@ jobs:
           esp_idf_version: v5.5.5
           target: esp32s3
           path: .
+      - name: Verify RGB bandwidth mitigations in effective sdkconfig
+        run: |
+          grep -qx 'CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1' sdkconfig
+          grep -qx 'CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y' sdkconfig
+          grep -qx 'CONFIG_SPIRAM_RODATA=y' sdkconfig
+          grep -qx 'CONFIG_COMPILER_OPTIMIZATION_PERF=y' sdkconfig
       - name: Build update and factory images
         run: |
           cp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
