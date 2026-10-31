@@ -21,13 +21,13 @@ jobs:
           target: esp32s3
           path: .
       - name: Full flash image and byte-level verification
-        run: python3 tools/merge_firmware.py build/flasher_args.json build/Kuechenradio_4B_Flash_0x0.bin
+        run: python3 tools/merge_firmware.py build/flasher_args.json "$RUNNER_TEMP/Kuechenradio_4B_Flash_0x0.bin"
       - name: Firmwarecheck
         run: |
           test -s build/bootloader/bootloader.bin
           test -s build/partition_table/partition-table.bin
           test -s build/kuechenradio_waveshare_4b.bin
-          test -s build/Kuechenradio_4B_Flash_0x0.bin
+          test -s "$RUNNER_TEMP/Kuechenradio_4B_Flash_0x0.bin"
           test -s build/flasher_args.json
       - name: Firmware archive
         uses: actions/upload-artifact@v4
@@ -37,7 +37,7 @@ jobs:
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
             build/kuechenradio_waveshare_4b.bin
-            build/Kuechenradio_4B_Flash_0x0.bin
+            ${{ runner.temp }}/Kuechenradio_4B_Flash_0x0.bin
             build/kuechenradio_waveshare_4b.elf
             build/flasher_args.json
           if-no-files-found: error
