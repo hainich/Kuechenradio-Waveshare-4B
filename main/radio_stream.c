@@ -1,7 +1,8 @@
 /*
- * Küchenradio: internet MP3 streams decoded by minimp3 (CC0),
- * output by Waveshare's ES8311 board support (ESP Codec Dev).
- * No binary AtlasCube or ESP Audio Codec decoder libraries.
+ * Kuechenradio: internet streams decoded with Espressif esp_audio_codec,
+ * output through the Waveshare ES8311 board support (ESP Codec Dev).
+ * The entire audio pipeline is pinned to core 0, leaving core 1 available
+ * for the RGB display and touch/LVGL handling.
  */
 #include "radio_stream.h"
 #include "radio_config.h"
@@ -35,6 +36,12 @@
 #define AUDIO_PCM_MAX_CAPACITY 65536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
 #define AUDIO_NETWORK_PACKET 1024
+/* Core 1 is reserved for responsive LVGL touch/display work. On core 0 the
+ * HTTP producer runs ahead of the audio consumer when data is available;
+ * both stay below ESP-IDF's high-priority Wi-Fi/TCP/IP system tasks. */
+#define RADIO_AUDIO_CORE 0
+#define RADIO_AUDIO_PRIORITY 4
+#define RADIO_HTTP_PRIORITY 5
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -298,7 +305,7 @@ static void play_stream(const char *url, uint32_t revision)
         if (!fifo_storage) continue;
         audio_ring_init(&pipe.ring, fifo_storage, capacity);
         if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
-                                    &pipe, 5, NULL, 0) == pdPASS) {
+                                    &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
             ESP_LOGI(TAG, "HTTP/I2S getrennt; interner Audiopuffer: %u Bytes",
                      (unsigned)capacity);
@@ -515,6 +522,11 @@ void radio_stream_start(void)
         status_set("ES8311 nicht gefunden");
         return;
     }
-    BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "radio_audio", 24576, NULL, 5, NULL, 1);
+    /* Audio used to run on core 1 at priority 5 and could monopolize the
+     * same core as LVGL. Keep all radio CPU work on core 0 instead. */
+    BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "radio_audio", 24576,
+                                            NULL, RADIO_AUDIO_PRIORITY, NULL, RADIO_AUDIO_CORE);
+    ESP_LOGI(TAG, "Audiotask: core %d priority %d; HTTP: core %d priority %d",
+             RADIO_AUDIO_CORE, RADIO_AUDIO_PRIORITY, RADIO_AUDIO_CORE, RADIO_HTTP_PRIORITY);
     if (ok != pdPASS) ESP_LOGE(TAG, "Audiotask konnte nicht gestartet werden");
 }
