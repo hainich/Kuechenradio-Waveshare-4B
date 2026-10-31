@@ -73,8 +73,12 @@ void radio_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
     if (cfg.ssid[0]) {
         wifi_config_t sta = {0};
-        snprintf((char *)sta.sta.ssid, sizeof(sta.sta.ssid), "%s", cfg.ssid);
-        snprintf((char *)sta.sta.password, sizeof(sta.sta.password), "%s", cfg.password);
+        size_t ssid_len = strnlen(cfg.ssid, sizeof(cfg.ssid));
+        if (ssid_len > sizeof(sta.sta.ssid)) ssid_len = sizeof(sta.sta.ssid);
+        memcpy(sta.sta.ssid, cfg.ssid, ssid_len);
+        size_t pass_len = strnlen(cfg.password, sizeof(cfg.password));
+        if (pass_len >= sizeof(sta.sta.password)) pass_len = sizeof(sta.sta.password) - 1;
+        memcpy(sta.sta.password, cfg.password, pass_len);
         sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
     }
