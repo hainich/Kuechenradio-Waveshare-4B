@@ -41,7 +41,7 @@ jobs:
           test -s build/bootloader/bootloader.bin
           test -s build/partition_table/partition-table.bin
           test -s build/kuechenradio_waveshare_4b.bin
-          cmp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
+          cmp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Küchenradio.bin"
           test -s "$RUNNER_TEMP/Kuechenradio_FACTORY_RESET_0x0.bin"
           test -s build/flasher_args.json
       - name: Küchenradio update archive (preserves WLAN)
