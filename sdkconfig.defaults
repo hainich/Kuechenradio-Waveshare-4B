@@ -13,11 +13,11 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=50
-# Waveshare 4B BSP supports two RGB framebuffers and LVGL anti-tearing mode.
-# Prevent drawing into the RGB framebuffer while it is being scanned out.
-CONFIG_BSP_LCD_RGB_BUFFER_NUMS=2
-CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR=y
-CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE=y
+# Hardware test: RGB double-buffer anti-tearing caused worse display/audio interference.
+# Revert to the original single-framebuffer configuration for isolation.
+CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1
+# CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR is not set
+# CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE is not set
 CONFIG_CODEC_ES8311_SUPPORT=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
