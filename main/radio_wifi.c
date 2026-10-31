@@ -32,19 +32,44 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-/* A kitchen radio should not broadcast a fixed-password setup access point
- * permanently. If it cannot connect to its saved Wi-Fi network, however,
- * start APSTA after 45 seconds so configuration can be recovered. */
+/* Recovery remains active for the full lifetime: the router can fail long
+ * after boot. The setup AP is enabled after 45 consecutive seconds without
+ * station connectivity and disabled again after recovery.
+ * All Wi-Fi mode changes occur in this one task, not the event callback.
+ */
 static void recovery_task(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(45000));
-    if (!s_connected) {
-        ESP_LOGW(TAG, "WLAN-Verbindung fehlgeschlagen; starte Setup-Netz");
-        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-        if (err != ESP_OK) ESP_LOGE(TAG, "Setup-Netz konnte nicht aktiviert werden: %s", esp_err_to_name(err));
+    unsigned seconds_offline = 0;
+    bool recovery_ap = false;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (s_connected) {
+            seconds_offline = 0;
+            if (recovery_ap) {
+                esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "WLAN wiederhergestellt; Setup-Netz ausgeschaltet");
+                    recovery_ap = false;
+                } else {
+                    ESP_LOGW(TAG, "Setup-Netz konnte nicht deaktiviert werden: %s",
+                             esp_err_to_name(err));
+                }
+            }
+        } else {
+            if (seconds_offline < 45) seconds_offline += 5;
+            if (seconds_offline >= 45 && !recovery_ap) {
+                esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+                if (err == ESP_OK) {
+                    ESP_LOGW(TAG, "WLAN seit 45 Sekunden getrennt; Setup-Netz aktiv");
+                    recovery_ap = true;
+                } else {
+                    ESP_LOGW(TAG, "Setup-Netz konnte nicht aktiviert werden: %s",
+                             esp_err_to_name(err));
+                }
+            }
+        }
     }
-    vTaskDelete(NULL);
 }
 
 void radio_wifi_start(void)
@@ -81,7 +106,7 @@ void radio_wifi_start(void)
     }
     ESP_ERROR_CHECK(esp_wifi_start());
     if (cfg.ssid[0]) {
-        if (xTaskCreate(recovery_task, "wifi_recovery", 3072, NULL, 3, NULL) != pdPASS) {
+        if (xTaskCreate(recovery_task, "wifi_recovery", 4096, NULL, 3, NULL) != pdPASS) {
             ESP_LOGE(TAG, "WLAN-Recovery-Task konnte nicht starten");
         }
     } else {
