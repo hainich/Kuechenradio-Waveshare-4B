@@ -1,0 +1,56 @@
+name: ESP32-S3 Küchenradio Firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Bootstrap Quellcode extrahieren und im Repository speichern
+        if: hashFiles('source_bundle.b64') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode source_bundle.b64 | tar -xJf -
+          test -s main/main.c
+          test -s main/radio_stream.c
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f source_bundle.b64
+          git add -A
+          git commit -m "Import fully expanded open-source ESP32-S3 kitchen radio sources"
+          git push origin HEAD:main
+      - name: Native tests
+        run: bash tests/run.sh
+      - name: ESP-IDF 5.5.5 Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: .
+      - name: Firmwarecheck
+        run: |
+          test -s build/bootloader/bootloader.bin
+          test -s build/partition_table/partition-table.bin
+          test -s build/kuechenradio_waveshare_4b.bin
+          test -s build/flasher_args.json
+      - name: Firmware-Archiv bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kuechenradio-Waveshare-4B-Firmware
+          path: |
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/kuechenradio_waveshare_4b.bin
+            build/kuechenradio_waveshare_4b.elf
+            build/flasher_args.json
+          if-no-files-found: error
