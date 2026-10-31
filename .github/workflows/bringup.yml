@@ -1,0 +1,40 @@
+name: Waveshare 4B Display Touch Audio Bring-up
+
+on:
+  push:
+    branches: [hardware-bringup]
+    paths:
+      - 'bringup/**'
+      - '.github/workflows/bringup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile hardware test ESP32-S3
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: bringup
+      - name: Check output
+        run: |
+          test -s bringup/build/waveshare_4b_hardware_test.bin
+          test -s bringup/build/bootloader/bootloader.bin
+          test -s bringup/build/partition_table/partition-table.bin
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveshare-4b-hardware-test
+          path: |
+            bringup/build/waveshare_4b_hardware_test.bin
+            bringup/build/bootloader/bootloader.bin
+            bringup/build/partition_table/partition-table.bin
+            bringup/build/flasher_args.json
+          if-no-files-found: error
