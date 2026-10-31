@@ -5,3 +5,5 @@ dependencies:
   # Keep the LVGL 9.3 API used by radio_ui.c (LV_LABEL_LONG_MODE_DOTS).
   # Without this pin the dependency resolver could select a different LVGL API version.
   lvgl/lvgl: "9.3.0"
+
+  espressif/esp_audio_codec: "2.5.0"

@@ -24,14 +24,15 @@
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "esp_codec_dev.h"
 
-/* MP3 decoder source: https://github.com/lieff/minimp3, CC0-1.0. */
-#define MINIMP3_ONLY_MP3
-#define MINIMP3_NO_SIMD
-#define MINIMP3_IMPLEMENTATION
-#include "minimp3.h"
+/* Espressif's optimized frame-aware streaming decoders (MP3, AAC, FLAC, OGG). */
+#include "esp_audio_dec_default.h"
+#include "esp_audio_simple_dec_default.h"
+#include "esp_audio_simple_dec.h"
+#include "esp_aac_dec.h"
 
-#define AUDIO_INPUT_CAPACITY 12288
 #define AUDIO_READ_SIZE 1536
+#define AUDIO_PCM_CAPACITY 16384
+#define AUDIO_PCM_MAX_CAPACITY 65536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
 #define AUDIO_NETWORK_PACKET 1024
 
@@ -59,7 +60,35 @@ const char *radio_stream_status(void)
 
 typedef struct {
     char redirect[384];
+    char content_type[96];
 } response_headers_t;
+
+static esp_audio_simple_dec_type_t stream_type(const char *content_type, const char *url)
+{
+    /* Trust the actual HTTP response over the often extensionless station URL. */
+    if (content_type[0]) {
+        if (!strncasecmp(content_type, "audio/aac", 9) ||
+            !strncasecmp(content_type, "audio/x-aac", 11) ||
+            !strncasecmp(content_type, "audio/aacp", 10))
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+        if (!strncasecmp(content_type, "audio/flac", 10) ||
+            !strncasecmp(content_type, "audio/x-flac", 12))
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
+        if (!strncasecmp(content_type, "audio/ogg", 9) ||
+            !strncasecmp(content_type, "application/ogg", 15))
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
+        if (!strncasecmp(content_type, "audio/mpeg", 10) ||
+            !strncasecmp(content_type, "audio/mp3", 9))
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    }
+    if (strstr(url, ".aac") || strstr(url, "/aac"))
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+    if (strstr(url, ".flac"))
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
+    if (strstr(url, ".ogg"))
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
+    return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+}
 
 static esp_err_t on_stream_event(esp_http_client_event_t *evt)
 {
@@ -68,11 +97,14 @@ static esp_err_t on_stream_event(esp_http_client_event_t *evt)
     if (evt->header_key && evt->header_value && !strcasecmp(evt->header_key, "Location")) {
         snprintf(headers->redirect, sizeof(headers->redirect), "%s", evt->header_value);
     }
+    if (evt->header_key && evt->header_value && !strcasecmp(evt->header_key, "Content-Type")) {
+        snprintf(headers->content_type, sizeof(headers->content_type), "%s", evt->header_value);
+    }
     return ESP_OK;
 }
 
 /* The config and event callback use stack memory only until fetch_headers completes. */
-static esp_http_client_handle_t open_stream(const char *url)
+static esp_http_client_handle_t open_stream(const char *url, esp_audio_simple_dec_type_t *type)
 {
     char target[384];
     snprintf(target, sizeof(target), "%s", url);
@@ -115,6 +147,9 @@ static esp_http_client_handle_t open_stream(const char *url)
             esp_http_client_cleanup(client);
             return NULL;
         }
+        *type = stream_type(headers.content_type, target);
+        ESP_LOGI(TAG, "Audioformat %s, Content-Type: %s",
+                 esp_audio_simple_dec_get_name(*type), headers.content_type);
         return client;
     }
     return NULL;
@@ -209,16 +244,19 @@ static void http_receiver_task(void *arg)
 
 static void play_stream(const char *url, uint32_t revision)
 {
-    esp_http_client_handle_t http = open_stream(url);
+    esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    esp_http_client_handle_t http = open_stream(url, &type);
     if (!http) {
         status_set("Stream nicht erreichbar");
         return;
     }
 
-    uint8_t *encoded = malloc(AUDIO_INPUT_CAPACITY);
-    mp3d_sample_t *pcm = malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t));
-    int16_t *mono = malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t));
-    mp3dec_t *decoder = malloc(sizeof(mp3dec_t));
+    uint8_t *encoded = malloc(AUDIO_READ_SIZE);
+    uint8_t *pcm = malloc(AUDIO_PCM_CAPACITY);
+    int16_t *mono = malloc(AUDIO_PCM_CAPACITY);
+    uint32_t pcm_capacity = AUDIO_PCM_CAPACITY;
+    uint32_t mono_capacity = AUDIO_PCM_CAPACITY;
+    esp_audio_simple_dec_handle_t decoder = NULL;
     audio_pipe_t pipe = { .http = http, .revision = revision };
     uint8_t *fifo_storage = NULL;
     bool receiver_started = false;
@@ -231,21 +269,28 @@ static void play_stream(const char *url, uint32_t revision)
     atomic_init(&pipe.eof, false);
     pipe.mu = xSemaphoreCreateMutex();
     pipe.finished = xSemaphoreCreateBinary();
-    if (!encoded || !pcm || !mono || !decoder) {
+    if (!encoded || !pcm || !mono || !pipe.mu || !pipe.finished) {
         status_set("Zu wenig RAM fuer Audio");
         goto done;
     }
-    mp3dec_init(decoder);
 
-    /*
-     * The Wi-Fi stack and I2S driver also need internal RAM. Allocate the
-     * largest practical FIFO without consuming the last 8 KiB contiguous
-     * internal block. Never silently fall back to PSRAM.
-     * If the receiver task cannot get a stack, retry with a smaller FIFO.
-     */
+    esp_aac_dec_cfg_t aac_cfg = { .aac_plus_enable = true };
+    esp_audio_simple_dec_cfg_t dec_cfg = {
+        .dec_type = type,
+        .dec_cfg = type == ESP_AUDIO_SIMPLE_DEC_TYPE_AAC ? &aac_cfg : NULL,
+        .cfg_size = type == ESP_AUDIO_SIMPLE_DEC_TYPE_AAC ? sizeof(aac_cfg) : 0,
+        .use_frame_dec = false,
+    };
+    if (esp_audio_simple_dec_open(&dec_cfg, &decoder) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "Decoder konnte %s nicht starten", esp_audio_simple_dec_get_name(type));
+        status_set("Audioformat nicht unterstuetzt");
+        goto done;
+    }
+
+    /* Keep the network producer independent of I2S and decoding. Internal SRAM
+       avoids the PSRAM contention observed with the previous large audio FIFO. */
     const size_t fifo_sizes[] = {24576, 16384, 12288, 8192};
-    for (size_t i = 0; pipe.mu && pipe.finished &&
-         i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
+    for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
         size_t capacity = fifo_sizes[i];
         if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
             < capacity + 8192) continue;
@@ -263,8 +308,7 @@ static void play_stream(const char *url, uint32_t revision)
         fifo_storage = NULL;
     }
     if (!receiver_started) {
-        /* Never lose a working radio merely because the extra FIFO does not fit. */
-        ESP_LOGW(TAG, "Interner RAM knapp: nutze bewaehrten direkten Audiopfad");
+        ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
     size_t refill = receiver_started ? pipe.ring.capacity / 3 : 0;
@@ -277,14 +321,8 @@ static void play_stream(const char *url, uint32_t revision)
         }
     }
 
-    int pending = 0;
     bool buffering = false;
     while (wanted(revision)) {
-        if (pending + AUDIO_READ_SIZE > AUDIO_INPUT_CAPACITY) {
-            ESP_LOGW(TAG, "MP3 frame synchronization lost");
-            status_set("Ungueltiger MP3-Stream");
-            break;
-        }
         int n;
         if (receiver_started) {
             if (pipe_used(&pipe) == 0) {
@@ -302,93 +340,128 @@ static void play_stream(const char *url, uint32_t revision)
                 if (!wanted(revision)) break;
                 if (pipe_used(&pipe) == 0 && atomic_load(&pipe.eof)) break;
             }
-            n = (int)pipe_read(&pipe, encoded + pending, AUDIO_READ_SIZE);
+            n = (int)pipe_read(&pipe, encoded, AUDIO_READ_SIZE);
             if (n == 0) {
                 vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
             }
         } else {
-            /* The original playback path remains a low-memory fallback. */
-            n = esp_http_client_read(http, (char *)encoded + pending, AUDIO_READ_SIZE);
+            n = esp_http_client_read(http, (char *)encoded, AUDIO_READ_SIZE);
             if (n <= 0) {
                 ESP_LOGW(TAG, "Direkter HTTP-Stream beendet: %d", n);
                 break;
             }
         }
-        pending += n;
-        int offset = 0;
-        while (pending - offset > 0 && wanted(revision)) {
-            mp3dec_frame_info_t info = {0};
-            int samples = mp3dec_decode_frame(decoder, encoded + offset, pending - offset, pcm, &info);
-            if (info.frame_bytes == 0) break;
-            if (info.frame_bytes > pending - offset) {
-                ESP_LOGE(TAG, "Decoder frame larger than buffer");
-                goto done;
-            }
-            offset += info.frame_bytes;
-            if (samples <= 0) continue;
-            if (samples > MINIMP3_MAX_SAMPLES_PER_FRAME / 2 ||
-                (info.channels != 1 && info.channels != 2) ||
-                info.hz < 8000 || info.hz > 48000) {
-                ESP_LOGW(TAG, "Unsupported stream format: %d Hz, %d channels, %d samples",
-                         info.hz, info.channels, samples);
-                status_set("MP3-Format nicht unterstuetzt");
-                goto done;
-            }
-            if (!opened || active_rate != info.hz) {
-                if (opened) {
-                    esp_codec_dev_close(s_speaker);
-                    opened = false;
-                }
-                esp_codec_dev_sample_info_t fmt = {
-                    .sample_rate = info.hz,
-                    .channel = 1,
-                    .bits_per_sample = 16,
-                };
-                if (esp_codec_dev_open(s_speaker, &fmt) != ESP_CODEC_DEV_OK) {
-                    ESP_LOGE(TAG, "ES8311 cannot open %d Hz", info.hz);
-                    status_set("ES8311 Audiofehler");
+
+        esp_audio_simple_dec_raw_t raw = { .buffer = encoded, .len = (uint32_t)n };
+        while (raw.len && wanted(revision)) {
+            esp_audio_simple_dec_out_t out = {
+                .buffer = pcm, .len = pcm_capacity
+            };
+            esp_audio_err_t err = esp_audio_simple_dec_process(decoder, &raw, &out);
+            if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
+                out.needed_size > pcm_capacity &&
+                out.needed_size <= AUDIO_PCM_MAX_CAPACITY) {
+                uint8_t *bigger = realloc(pcm, out.needed_size);
+                if (!bigger) {
+                    status_set("Zu wenig RAM fuer Decoder");
                     goto done;
                 }
-                opened = true;
-                active_rate = info.hz;
-                volume_applied = -1;
-                status_set("Spielt");
-            } else if (buffering) {
-                status_set("Spielt");
+                pcm = bigger;
+                pcm_capacity = out.needed_size;
+                continue;
             }
-            buffering = false;
-            radio_settings_t settings;
-            radio_config_get(&settings);
-            if (volume_applied != settings.volume) {
-                esp_codec_dev_set_out_vol(s_speaker, settings.volume);
-                volume_applied = settings.volume;
-            }
-            if (info.channels == 1) {
-                memcpy(mono, pcm, (size_t)samples * sizeof(int16_t));
-            } else {
-                for (int i = 0; i < samples; ++i) {
-                    mono[i] = (int16_t)(((int32_t)pcm[i * 2] + (int32_t)pcm[i * 2 + 1]) / 2);
-                }
-            }
-            if (esp_codec_dev_write(s_speaker, mono, samples * (int)sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
-                ESP_LOGE(TAG, "Audioausgabe fehlgeschlagen");
-                status_set("Audioausgabe fehlgeschlagen");
+            if (err != ESP_AUDIO_ERR_OK) {
+                ESP_LOGE(TAG, "Audio decoder error %d (%s)", err,
+                         esp_audio_simple_dec_get_name(type));
+                status_set("Stream-Dekodierung fehlgeschlagen");
                 goto done;
             }
+            if (out.decoded_size) {
+                esp_audio_simple_dec_info_t info = {0};
+                if (esp_audio_simple_dec_get_info(decoder, &info) != ESP_AUDIO_ERR_OK ||
+                    info.bits_per_sample != 16 || info.channel < 1 || info.channel > 2 ||
+                    info.sample_rate < 8000 || info.sample_rate > 48000 ||
+                    out.decoded_size % (info.channel * sizeof(int16_t))) {
+                    status_set("Audioformat nicht unterstuetzt");
+                    goto done;
+                }
+                size_t samples = out.decoded_size / (info.channel * sizeof(int16_t));
+                if (samples * sizeof(int16_t) > mono_capacity) {
+                    uint32_t needed = (uint32_t)(samples * sizeof(int16_t));
+                    int16_t *bigger = realloc(mono, needed);
+                    if (!bigger) {
+                        status_set("Zu wenig RAM fuer Audio");
+                        goto done;
+                    }
+                    mono = bigger;
+                    mono_capacity = needed;
+                }
+                if (!opened || active_rate != (int)info.sample_rate) {
+                    if (opened) {
+                        esp_codec_dev_close(s_speaker);
+                        opened = false;
+                    }
+                    esp_codec_dev_sample_info_t fmt = {
+                        .sample_rate = (int)info.sample_rate,
+                        .channel = 1,
+                        .bits_per_sample = 16,
+                    };
+                    if (esp_codec_dev_open(s_speaker, &fmt) != ESP_CODEC_DEV_OK) {
+                        ESP_LOGE(TAG, "ES8311 cannot open %u Hz", info.sample_rate);
+                        status_set("ES8311 Audiofehler");
+                        goto done;
+                    }
+                    opened = true;
+                    active_rate = (int)info.sample_rate;
+                    volume_applied = -1;
+                }
+                radio_settings_t settings;
+                radio_config_get(&settings);
+                if (volume_applied != settings.volume) {
+                    esp_codec_dev_set_out_vol(s_speaker, settings.volume);
+                    volume_applied = settings.volume;
+                }
+                const int16_t *stereo = (const int16_t *)pcm;
+                if (info.channel == 1) {
+                    memcpy(mono, pcm, samples * sizeof(int16_t));
+                } else {
+                    for (size_t i = 0; i < samples; ++i) {
+                        mono[i] = (int16_t)(((int32_t)stereo[i * 2] +
+                                            (int32_t)stereo[i * 2 + 1]) / 2);
+                    }
+                }
+                if (esp_codec_dev_write(s_speaker, mono,
+                                        (int)(samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+                    status_set("Audioausgabe fehlgeschlagen");
+                    goto done;
+                }
+                if (buffering) status_set("Spielt");
+                buffering = false;
+                status_set("Spielt");
+            }
+            if (raw.consumed > raw.len) {
+                ESP_LOGE(TAG, "Decoder invalid consumed size");
+                goto done;
+            }
+            if (raw.consumed == 0) {
+                ESP_LOGE(TAG, "Decoder made no input progress");
+                status_set("Decoder blockiert");
+                goto done;
+            }
+            raw.buffer += raw.consumed;
+            raw.len -= raw.consumed;
         }
-        pending -= offset;
-        if (pending && offset) memmove(encoded, encoded + offset, pending);
     }
 
 done:
     if (receiver_started) {
         atomic_store(&pipe.stop, true);
-        /* Receiver exclusively owns the HTTP handle until it signals exit. */
         xSemaphoreTake(pipe.finished, portMAX_DELAY);
         ESP_LOGI(TAG, "Audiopuffer-Unterlaeufe: %u", underruns);
     }
     if (opened) esp_codec_dev_close(s_speaker);
+    if (decoder) esp_audio_simple_dec_close(decoder);
     esp_http_client_cleanup(http);
     if (pipe.finished) vSemaphoreDelete(pipe.finished);
     if (pipe.mu) vSemaphoreDelete(pipe.mu);
@@ -396,7 +469,6 @@ done:
     free(encoded);
     free(pcm);
     free(mono);
-    free(decoder);
 }
 
 static void stream_task(void *arg)
@@ -435,6 +507,8 @@ void radio_stream_start(void)
 {
     s_status_mu = xSemaphoreCreateMutex();
     if (!s_status_mu) abort();
+    esp_audio_dec_register_default();
+    esp_audio_simple_dec_register_default();
     s_speaker = bsp_audio_codec_speaker_init();
     if (!s_speaker) {
         ESP_LOGE(TAG, "ES8311 konnte nicht initialisiert werden");
