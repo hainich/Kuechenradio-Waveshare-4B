@@ -26,7 +26,7 @@ jobs:
           p=Path(__import__('os').environ['RUNNER_TEMP'])/'Kuechenradio_GitHub_Quellcode.zip'
           tracked=set(subprocess.check_output(['git','ls-files'],text=True).splitlines())
           with zipfile.ZipFile(p) as z:
-              archived=set(z.namelist())
+              archived={name for name in z.namelist() if not name.endswith('/')}
               assert tracked == archived, (tracked-archived,archived-tracked)
               assert z.testzip() is None
               print('Verified files:',len(archived))
