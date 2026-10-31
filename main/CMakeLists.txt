@@ -21,5 +21,5 @@ endif()
 idf_component_register(
     SRCS "main.c" "radio_config.c" "radio_stream.c" "radio_wifi.c" "radio_web.c" "radio_ui.c" "url_codec.c"
     INCLUDE_DIRS "." "vendor"
-    REQUIRES nvs_flash esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls mbedtls lwip
+    REQUIRES esp_audio_codec nvs_flash esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls mbedtls lwip
 )
