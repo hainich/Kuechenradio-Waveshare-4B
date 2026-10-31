@@ -1,7 +1,7 @@
 name: ESP32-S3 Küchenradio Firmware
 on:
   push:
-    branches: [main]
+    branches: [main, audio-atlascube-codecs]
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,6 +32,8 @@ jobs:
           grep -q 'MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT' main/radio_stream.c
           ! grep -q 'MALLOC_CAP_SPIRAM' main/radio_stream.c
           grep -q 'xTaskCreatePinnedToCore(http_receiver_task' main/radio_stream.c
+          grep -q 'esp_audio_simple_dec_process' main/radio_stream.c
+          grep -q 'esp_audio_dec_register_default' main/radio_stream.c
       - name: Build update and factory images
         run: |
           cp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Küchenradio.bin"
