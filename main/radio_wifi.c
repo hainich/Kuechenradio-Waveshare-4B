@@ -21,6 +21,8 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_connected = false;
+        const wifi_event_sta_disconnected_t *ev = (const wifi_event_sta_disconnected_t *)data;
+        ESP_LOGW(TAG, "Heim-WLAN getrennt: reason=%u; neuer Verbindungsversuch", (unsigned)ev->reason);
         /* Reconnect in STA and APSTA mode; when credentials are wrong,
          * the fallback task exposes the configuration access point. */
         esp_wifi_connect();
@@ -32,46 +34,9 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-/* Recovery remains active for the full lifetime: the router can fail long
- * after boot. The setup AP is enabled after 45 consecutive seconds without
- * station connectivity and disabled again after recovery.
- * All Wi-Fi mode changes occur in this one task, not the event callback.
- */
-static void recovery_task(void *arg)
-{
-    (void)arg;
-    unsigned seconds_offline = 0;
-    bool recovery_ap = false;
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        if (s_connected) {
-            seconds_offline = 0;
-            if (recovery_ap) {
-                esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-                if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "WLAN wiederhergestellt; Setup-Netz ausgeschaltet");
-                    recovery_ap = false;
-                } else {
-                    ESP_LOGW(TAG, "Setup-Netz konnte nicht deaktiviert werden: %s",
-                             esp_err_to_name(err));
-                }
-            }
-        } else {
-            if (seconds_offline < 45) seconds_offline += 5;
-            if (seconds_offline >= 45 && !recovery_ap) {
-                esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-                if (err == ESP_OK) {
-                    ESP_LOGW(TAG, "WLAN seit 45 Sekunden getrennt; Setup-Netz aktiv");
-                    recovery_ap = true;
-                } else {
-                    ESP_LOGW(TAG, "Setup-Netz konnte nicht aktiviert werden: %s",
-                             esp_err_to_name(err));
-                }
-            }
-        }
-    }
-}
-
+/* Keep the configuration AP available even when the station cannot connect.
+ * This avoids locking the user out after saving incorrect or incompatible
+ * router credentials.  APSTA is supported by ESP32-S3. */
 void radio_wifi_start(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -92,8 +57,7 @@ void radio_wifi_start(void)
     ap.ap.channel = 1;
     ap.ap.max_connection = 2;
     ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    /* The AP configuration is retained for recovery even when initially
-     * starting only in STA mode. */
+    /* Keep setup access active while joining the home network. */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
     if (cfg.ssid[0]) {
@@ -102,13 +66,10 @@ void radio_wifi_start(void)
         strncpy((char *)sta.sta.password, cfg.password, sizeof(sta.sta.password) - 1);
         sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     }
     ESP_ERROR_CHECK(esp_wifi_start());
     if (cfg.ssid[0]) {
-        if (xTaskCreate(recovery_task, "wifi_recovery", 4096, NULL, 3, NULL) != pdPASS) {
-            ESP_LOGE(TAG, "WLAN-Recovery-Task konnte nicht starten");
-        }
+        ESP_LOGI(TAG, "Verbinde mit Heim-WLAN '%s'; Setup-WLAN bleibt aktiv", cfg.ssid);
     } else {
         ESP_LOGI(TAG, "Ersteinrichtung: Setup WLAN %s / http://192.168.4.1", RADIO_AP_SSID);
     }
