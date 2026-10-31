@@ -1,0 +1,7 @@
+dependencies:
+  idf: ">=5.4,<6.0"
+  # BSP for the exact Waveshare ESP32-S3-Touch-LCD-4B hardware.
+  waveshare/esp32_s3_touch_lcd_4b: "2.0.0"
+  # Keep the LVGL 9.3 API used by radio_ui.c (LV_LABEL_LONG_MODE_DOTS).
+  # Without this pin the dependency resolver could select a different LVGL API version.
+  lvgl/lvgl: "9.3.0"
