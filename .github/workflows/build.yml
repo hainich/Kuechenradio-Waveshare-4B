@@ -20,24 +20,28 @@ jobs:
           esp_idf_version: v5.5.5
           target: esp32s3
           path: .
-      - name: Full flash image and byte-level verification
-        run: python3 tools/merge_firmware.py build/flasher_args.json "$RUNNER_TEMP/Kuechenradio_4B_Flash_0x0.bin"
+      - name: Build update and factory images
+        run: |
+          cp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
+          python3 tools/merge_firmware.py build/flasher_args.json "$RUNNER_TEMP/Kuechenradio_FACTORY_RESET_0x0.bin"
       - name: Firmwarecheck
         run: |
           test -s build/bootloader/bootloader.bin
           test -s build/partition_table/partition-table.bin
           test -s build/kuechenradio_waveshare_4b.bin
-          test -s "$RUNNER_TEMP/Kuechenradio_4B_Flash_0x0.bin"
+          cmp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
+          test -s "$RUNNER_TEMP/Kuechenradio_FACTORY_RESET_0x0.bin"
           test -s build/flasher_args.json
       - name: Firmware archive
         uses: actions/upload-artifact@v4
         with:
           name: Kuechenradio-Waveshare-4B-Firmware
           path: |
+            ${{ runner.temp }}/Kuechenradio_UPDATE_0x10000.bin
+            ${{ runner.temp }}/Kuechenradio_FACTORY_RESET_0x0.bin
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
             build/kuechenradio_waveshare_4b.bin
-            ${{ runner.temp }}/Kuechenradio_4B_Flash_0x0.bin
             build/kuechenradio_waveshare_4b.elf
             build/flasher_args.json
           if-no-files-found: error
