@@ -16,6 +16,8 @@ static char s_address[20] = "192.168.4.1";
 static char s_home_ssid[RADIO_SSID_MAX];
 static volatile unsigned s_disconnect_reason;
 static volatile unsigned s_connect_attempts;
+static volatile bool s_setup_ap_active;
+static bool s_home_configured;
 
 static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
 {
@@ -44,9 +46,37 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-/* Keep the configuration AP available even when the station cannot connect.
- * This avoids locking the user out after saving incorrect or incompatible
- * router credentials.  APSTA is supported by ESP32-S3. */
+/*
+ * Normally use STA only: an always-on setup AP adds Wi-Fi airtime.
+ * If saved credentials fail for 25 seconds, expose the setup AP again.
+ * Keep the fallback AP until reboot to avoid mode switches mid-stream.
+ */
+static void wifi_fallback_task(void *arg)
+{
+    (void)arg;
+    unsigned disconnected_seconds = 0;
+    for (;;) {
+        if (s_connected) {
+            disconnected_seconds = 0;
+        } else if (s_home_configured && !s_setup_ap_active) {
+            if (++disconnected_seconds >= 25) {
+                wifi_mode_t mode;
+                if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_STA) {
+                    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+                    if (err == ESP_OK) {
+                        s_setup_ap_active = true;
+                        ESP_LOGW(TAG, "Heim-WLAN nicht erreichbar: Setup-AP aktiviert");
+                    } else {
+                        ESP_LOGE(TAG, "Setup-AP konnte nicht starten: %s", esp_err_to_name(err));
+                    }
+                }
+                disconnected_seconds = 0;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 void radio_wifi_start(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -60,6 +90,7 @@ void radio_wifi_start(void)
     radio_settings_t cfg;
     radio_config_get(&cfg);
     snprintf(s_home_ssid, sizeof(s_home_ssid), "%s", cfg.ssid);
+    s_home_configured = cfg.ssid[0] != '\0';
 
     wifi_config_t ap = {0};
     strncpy((char *)ap.ap.ssid, RADIO_AP_SSID, sizeof(ap.ap.ssid) - 1);
@@ -68,10 +99,11 @@ void radio_wifi_start(void)
     ap.ap.channel = 1;
     ap.ap.max_connection = 2;
     ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    /* Keep setup access active while joining the home network. */
+
+    /* Configure both interfaces before selecting the normal operating mode. */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    if (cfg.ssid[0]) {
+    if (s_home_configured) {
         wifi_config_t sta = {0};
         size_t ssid_len = strnlen(cfg.ssid, sizeof(cfg.ssid));
         if (ssid_len > sizeof(sta.sta.ssid)) ssid_len = sizeof(sta.sta.ssid);
@@ -81,10 +113,23 @@ void radio_wifi_start(void)
         memcpy(sta.sta.password, cfg.password, pass_len);
         sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    } else {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        s_setup_ap_active = true;
     }
     ESP_ERROR_CHECK(esp_wifi_start());
-    if (cfg.ssid[0]) {
-        ESP_LOGI(TAG, "Verbinde mit Heim-WLAN '%s'; Setup-WLAN bleibt aktiv", cfg.ssid);
+
+    if (s_home_configured) {
+        /* ESP-IDF defaults to WIFI_PS_MIN_MODEM, which delays TCP reception. */
+        esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "WLAN Power Save konnte nicht deaktiviert werden: %s", esp_err_to_name(err));
+        }
+        ESP_LOGI(TAG, "Verbinde mit Heim-WLAN '%s' im STA-Modus", cfg.ssid);
+        if (xTaskCreate(wifi_fallback_task, "wifi_fallback", 3072, NULL, 2, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "WLAN-Setup-Rueckfalltask konnte nicht starten");
+        }
     } else {
         ESP_LOGI(TAG, "Ersteinrichtung: Setup WLAN %s / http://192.168.4.1", RADIO_AP_SSID);
     }
@@ -99,6 +144,8 @@ void radio_wifi_diagnostic(char *out, size_t size)
         snprintf(out, size, "WLAN: keine SSID gespeichert");
     } else if (s_connected) {
         snprintf(out, size, "WLAN verbunden: %s", s_address);
+    } else if (s_setup_ap_active) {
+        snprintf(out, size, "Setup-WLAN aktiv: %s", RADIO_AP_SSID);
     } else if (s_disconnect_reason != 0) {
         snprintf(out, size, "WLAN Fehler %u: %.28s", s_disconnect_reason, s_home_ssid);
     } else {
