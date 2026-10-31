@@ -231,7 +231,7 @@ static void play_stream(const char *url, uint32_t revision)
     atomic_init(&pipe.eof, false);
     pipe.mu = xSemaphoreCreateMutex();
     pipe.finished = xSemaphoreCreateBinary();
-    if (!encoded || !pcm || !mono || !decoder || !pipe.mu || !pipe.finished) {
+    if (!encoded || !pcm || !mono || !decoder) {
         status_set("Zu wenig RAM fuer Audio");
         goto done;
     }
@@ -244,14 +244,15 @@ static void play_stream(const char *url, uint32_t revision)
      * If the receiver task cannot get a stack, retry with a smaller FIFO.
      */
     const size_t fifo_sizes[] = {24576, 16384, 12288, 8192};
-    for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
+    for (size_t i = 0; pipe.mu && pipe.finished &&
+         i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
         size_t capacity = fifo_sizes[i];
         if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
             < capacity + 8192) continue;
         fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!fifo_storage) continue;
         audio_ring_init(&pipe.ring, fifo_storage, capacity);
-        if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 6144,
+        if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
                                     &pipe, 5, NULL, 0) == pdPASS) {
             receiver_started = true;
             ESP_LOGI(TAG, "HTTP/I2S getrennt; interner Audiopuffer: %u Bytes",
@@ -262,17 +263,18 @@ static void play_stream(const char *url, uint32_t revision)
         fifo_storage = NULL;
     }
     if (!receiver_started) {
-        ESP_LOGE(TAG, "Nicht genug interner RAM fuer Audioempfangstask");
-        status_set("Zu wenig interner RAM fuer Audio");
-        goto done;
+        /* Never lose a working radio merely because the extra FIFO does not fit. */
+        ESP_LOGW(TAG, "Interner RAM knapp: nutze bewaehrten direkten Audiopfad");
     }
 
-    size_t start_fill = pipe.ring.capacity / 2;
-    size_t refill = pipe.ring.capacity / 3;
-    status_set("Puffert Audiostream ...");
-    while (wanted(revision) && !atomic_load(&pipe.eof) &&
-           pipe_used(&pipe) < start_fill) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    size_t refill = receiver_started ? pipe.ring.capacity / 3 : 0;
+    if (receiver_started) {
+        size_t start_fill = pipe.ring.capacity / 2;
+        status_set("Puffert Audiostream ...");
+        while (wanted(revision) && !atomic_load(&pipe.eof) &&
+               pipe_used(&pipe) < start_fill) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
 
     int pending = 0;
@@ -283,25 +285,35 @@ static void play_stream(const char *url, uint32_t revision)
             status_set("Ungueltiger MP3-Stream");
             break;
         }
-        if (pipe_used(&pipe) == 0) {
-            if (atomic_load(&pipe.eof)) break;
-            if (!buffering) {
-                ++underruns;
-                buffering = true;
-                status_set("Puffert Audiostream ...");
-                ESP_LOGW(TAG, "Audio FIFO underrun %u", underruns);
+        int n;
+        if (receiver_started) {
+            if (pipe_used(&pipe) == 0) {
+                if (atomic_load(&pipe.eof)) break;
+                if (!buffering) {
+                    ++underruns;
+                    buffering = true;
+                    status_set("Puffert Audiostream ...");
+                    ESP_LOGW(TAG, "Audio FIFO underrun %u", underruns);
+                }
+                while (wanted(revision) && !atomic_load(&pipe.eof) &&
+                       pipe_used(&pipe) < refill) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                if (!wanted(revision)) break;
+                if (pipe_used(&pipe) == 0 && atomic_load(&pipe.eof)) break;
             }
-            while (wanted(revision) && !atomic_load(&pipe.eof) &&
-                   pipe_used(&pipe) < refill) {
-                vTaskDelay(pdMS_TO_TICKS(10));
+            n = (int)pipe_read(&pipe, encoded + pending, AUDIO_READ_SIZE);
+            if (n == 0) {
+                vTaskDelay(pdMS_TO_TICKS(5));
+                continue;
             }
-            if (!wanted(revision)) break;
-            if (pipe_used(&pipe) == 0 && atomic_load(&pipe.eof)) break;
-        }
-        int n = (int)pipe_read(&pipe, encoded + pending, AUDIO_READ_SIZE);
-        if (n == 0) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
+        } else {
+            /* The original playback path remains a low-memory fallback. */
+            n = esp_http_client_read(http, (char *)encoded + pending, AUDIO_READ_SIZE);
+            if (n <= 0) {
+                ESP_LOGW(TAG, "Direkter HTTP-Stream beendet: %d", n);
+                break;
+            }
         }
         pending += n;
         int offset = 0;
