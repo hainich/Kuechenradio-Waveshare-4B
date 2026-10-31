@@ -26,9 +26,15 @@ jobs:
           grep -qx 'CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y' sdkconfig
           grep -qx 'CONFIG_SPIRAM_RODATA=y' sdkconfig
           grep -qx 'CONFIG_COMPILER_OPTIMIZATION_PERF=y' sdkconfig
+      - name: Verify audio architecture before packaging
+        run: |
+          grep -q 'esp_wifi_set_ps(WIFI_PS_NONE)' main/radio_wifi.c
+          grep -q 'MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT' main/radio_stream.c
+          ! grep -q 'MALLOC_CAP_SPIRAM' main/radio_stream.c
+          grep -q 'xTaskCreatePinnedToCore(http_receiver_task' main/radio_stream.c
       - name: Build update and factory images
         run: |
-          cp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
+          cp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Küchenradio.bin"
           python3 tools/merge_firmware.py build/flasher_args.json "$RUNNER_TEMP/Kuechenradio_FACTORY_RESET_0x0.bin"
       - name: Firmwarecheck
         run: |
@@ -38,16 +44,19 @@ jobs:
           cmp build/kuechenradio_waveshare_4b.bin "$RUNNER_TEMP/Kuechenradio_UPDATE_0x10000.bin"
           test -s "$RUNNER_TEMP/Kuechenradio_FACTORY_RESET_0x0.bin"
           test -s build/flasher_args.json
-      - name: Firmware archive
+      - name: Küchenradio update archive (preserves WLAN)
         uses: actions/upload-artifact@v4
         with:
-          name: Kuechenradio-Waveshare-4B-Firmware
+          name: Küchenradio-Update
+          path: ${{ runner.temp }}/Küchenradio.bin
+          if-no-files-found: error
+      - name: Factory reset archive (erases WLAN)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Küchenradio-Factory-Reset
           path: |
-            ${{ runner.temp }}/Kuechenradio_UPDATE_0x10000.bin
             ${{ runner.temp }}/Kuechenradio_FACTORY_RESET_0x0.bin
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
-            build/kuechenradio_waveshare_4b.bin
-            build/kuechenradio_waveshare_4b.elf
             build/flasher_args.json
           if-no-files-found: error
