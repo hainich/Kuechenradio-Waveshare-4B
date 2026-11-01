@@ -239,9 +239,10 @@ static void http_receiver_task(void *arg)
                 ESP_LOGE(TAG, "Audio FIFO overflow");
                 break;
             }
-        } else if (n == 0 && !esp_http_client_is_complete_data_received(pipe->http) &&
+        } else if ((n == 0 || n == -ESP_ERR_HTTP_EAGAIN) &&
+                   !esp_http_client_is_complete_data_received(pipe->http) &&
                    (xTaskGetTickCount() - last_payload) < pdMS_TO_TICKS(12000)) {
-            /* A short read with no bytes is not EOF for a live stream. */
+            /* A short zero-byte read or ESP-IDF EAGAIN is not EOF for a live stream. */
             if (++read_timeouts % 5 == 0) {
                 ESP_LOGW(TAG, "HTTP no payload for %u reads", read_timeouts);
             }
