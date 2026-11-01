@@ -169,40 +169,40 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / Basis Firmware #49 / Nur Messinstrumentierung\\n");
-    REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\\n",
+    REPORT("KUECHENRADIO DIAGNOSE / Basis Firmware #49 / Nur Messinstrumentierung\n");
+    REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\n",
            (unsigned long)(d.uptime_ms / 1000), (int)esp_reset_reason(),
            radio_wifi_connected() ? "ja" : "nein");
-    REPORT("Intern frei: %lu B | groesster Block: %lu B\\n",
+    REPORT("Intern frei: %lu B | groesster Block: %lu B\n",
            (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
            (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    REPORT("Puffer: %lu / %lu B | Underruns: %lu | Audio-Luecken >=250ms: %lu (Maximum %lu ms)\\n",
+    REPORT("Puffer: %lu / %lu B | Underruns: %lu | Audio-Luecken >=250ms: %lu (Maximum %lu ms)\n",
            (unsigned long)d.fifo_bytes, (unsigned long)d.fifo_capacity,
            (unsigned long)d.fifo_underruns, (unsigned long)d.audio_gaps,
            (unsigned long)d.audio_gap_max_ms);
-    REPORT("HTTP: %lu Reads | %lu Bytes | %lu ohne Daten | %lu langsam >=350ms | %lu Fehler | Maximum %lu ms\\n",
+    REPORT("HTTP: %lu Reads | %lu Bytes | %lu ohne Daten | %lu langsam >=350ms | %lu Fehler | Maximum %lu ms\n",
            (unsigned long)d.http_reads, (unsigned long)d.http_bytes,
            (unsigned long)d.http_no_payload, (unsigned long)d.http_slow,
            (unsigned long)d.http_errors, (unsigned long)d.http_max_ms);
-    REPORT("Decoder: %lu langsam >=100ms, Maximum %lu ms | Codec: %lu langsam >=150ms, Maximum %lu ms\\n",
+    REPORT("Decoder: %lu langsam >=100ms, Maximum %lu ms | Codec: %lu langsam >=150ms, Maximum %lu ms\n",
            (unsigned long)d.decoder_slow, (unsigned long)d.decoder_max_ms,
            (unsigned long)d.codec_slow, (unsigned long)d.codec_max_ms);
-    REPORT("LVGL-Timer: %lu Verzoegerungen >=1800ms, groesstes Intervall %lu ms | Touchaktionen: %lu\\n",
+    REPORT("LVGL-Timer: %lu Verzoegerungen >=1800ms, groesstes Intervall %lu ms | Touchaktionen: %lu\n",
            (unsigned long)d.ui_lags, (unsigned long)d.ui_max_lag_ms,
            (unsigned long)d.ui_actions);
-    REPORT("WLAN-Abbrueche: %lu | Stream-Starts: %lu | Stream-Enden: %lu\\n",
+    REPORT("WLAN-Abbrueche: %lu | Stream-Starts: %lu | Stream-Enden: %lu\n",
            (unsigned long)d.wifi_disconnects, (unsigned long)d.stream_starts,
            (unsigned long)d.stream_ends);
-    REPORT("Letzte erfolgreiche Daten: HTTP %s%lu ms | Audio %s%lu ms | LVGL %s%lu ms\\n",
+    REPORT("Letzte erfolgreiche Daten: HTTP %s%lu ms | Audio %s%lu ms | LVGL %s%lu ms\n",
            d.last_http_ms ? "" : "nie/", (unsigned long)(d.last_http_ms ? d.uptime_ms - d.last_http_ms : 0),
            d.last_audio_ms ? "" : "nie/", (unsigned long)(d.last_audio_ms ? d.uptime_ms - d.last_audio_ms : 0),
            d.last_ui_ms ? "" : "nie/", (unsigned long)(d.last_ui_ms ? d.uptime_ms - d.last_ui_ms : 0));
-    REPORT("\\nLetzte %lu Ereignisse (neueste zuerst). Alle Zeitangaben in ms seit Neustart.\\n",
+    REPORT("\nLetzte %lu Ereignisse (neueste zuerst). Alle Zeitangaben in ms seit Neustart.\n",
            (unsigned long)d.event_count);
-    REPORT("Zeit(ms)       Ereignis                Wert  Zusatz FIFO  HTTP-Alter Audio-Alter LVGL-Alter\\n");
+    REPORT("Zeit(ms)       Ereignis                Wert  Zusatz FIFO  HTTP-Alter Audio-Alter LVGL-Alter\n");
     for (uint32_t i = 0; i < d.event_count; ++i) {
         const radio_diag_event_t *ev = &d.events[i];
-        REPORT("%10lu  %-24s %7lu %6d %5lu %10ld %11ld %10ld\\n",
+        REPORT("%10lu  %-24s %7lu %6d %5lu %10ld %11ld %10ld\n",
                (unsigned long)ev->ms, radio_diag_name((radio_diag_kind_t)ev->kind),
                (unsigned long)ev->value, (int)ev->aux,
                (unsigned long)ev->fifo_bytes,
@@ -210,8 +210,8 @@ static esp_err_t diagnose_get(httpd_req_t *req)
                ev->audio_age_ms == UINT32_MAX ? -1L : (long)ev->audio_age_ms,
                ev->ui_age_ms == UINT32_MAX ? -1L : (long)ev->ui_age_ms);
     }
-    REPORT("\\nLegende: HTTP-Alter = Zeit seit letztem empfangenen Audio-Byte, Audio-Alter = Zeit seit letzter abgeschlossener PCM-Ausgabe, LVGL-Alter = Zeit seit letztem 1s-UI-Timer. -1 = noch keine Messung.\\n");
-    REPORT("AUDIO_GAP misst Abstand zwischen PCM-Schreibaufrufen und beweist allein keine DAC-Stille.\\n");
+    REPORT("\nLegende: HTTP-Alter = Zeit seit letztem empfangenen Audio-Byte, Audio-Alter = Zeit seit letzter abgeschlossener PCM-Ausgabe, LVGL-Alter = Zeit seit letztem 1s-UI-Timer. -1 = noch keine Messung.\n");
+    REPORT("AUDIO_GAP misst Abstand zwischen PCM-Schreibaufrufen und beweist allein keine DAC-Stille.\n");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t result = httpd_resp_send(req, report, used);
