@@ -226,6 +226,7 @@ static void http_receiver_task(void *arg)
     audio_pipe_t *pipe = (audio_pipe_t *)arg;
     uint8_t packet[AUDIO_NETWORK_PACKET];
     unsigned read_timeouts = 0;
+    TickType_t last_payload = xTaskGetTickCount();
     while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -234,14 +235,19 @@ static void http_receiver_task(void *arg)
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
         if (n > 0) {
             read_timeouts = 0;
+            last_payload = xTaskGetTickCount();
             /* Only the consumer can change free space, and it increases it. */
             if (pipe_write(pipe, packet, (size_t)n) != (size_t)n) {
                 ESP_LOGE(TAG, "Audio FIFO overflow");
                 break;
             }
-        } else if (n == 0 && ++read_timeouts < 3) {
-            /* A transient HTTP read timeout is not necessarily stream EOF. */
-            ESP_LOGW(TAG, "HTTP stream timeout (%u/3)", read_timeouts);
+        } else if (n == 0 && !esp_http_client_is_complete_data_received(pipe->http) &&
+                   (xTaskGetTickCount() - last_payload) < pdMS_TO_TICKS(15000)) {
+            /* A short read with no bytes is not EOF for a live stream. */
+            if (++read_timeouts % 5 == 0) {
+                ESP_LOGW(TAG, "HTTP no payload for %u reads", read_timeouts);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
         } else {
             ESP_LOGW(TAG, "HTTP stream ended: %d", n);
             break;
@@ -467,6 +473,8 @@ static void play_stream(const char *url, uint32_t revision)
 done:
     if (receiver_started) {
         atomic_store(&pipe.stop, true);
+        /* HTTP read is bounded by AUDIO_HTTP_TIMEOUT_MS. Do not free pipe
+         * or its HTTP handle until the receiver has exited. */
         xSemaphoreTake(pipe.finished, portMAX_DELAY);
         ESP_LOGI(TAG, "Audiopuffer-Unterlaeufe: %u", underruns);
     }
