@@ -296,7 +296,7 @@ static void play_stream(const char *url, uint32_t revision)
 
     /* Keep the network producer independent of I2S and decoding. Internal SRAM
        avoids the PSRAM contention observed with the previous large audio FIFO. */
-    const size_t fifo_sizes[] = {24576, 16384, 12288, 8192};
+    const size_t fifo_sizes[] = {32768, 24576, 16384, 12288, 8192};
     for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
         size_t capacity = fifo_sizes[i];
         if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -318,9 +318,9 @@ static void play_stream(const char *url, uint32_t revision)
         ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
-    size_t refill = receiver_started ? pipe.ring.capacity / 3 : 0;
+    size_t refill = receiver_started ? pipe.ring.capacity / 2 : 0;
     if (receiver_started) {
-        size_t start_fill = pipe.ring.capacity / 2;
+        size_t start_fill = pipe.ring.capacity * 3 / 4;
         status_set("Puffert Audiostream ...");
         while (wanted(revision) && !atomic_load(&pipe.eof) &&
                pipe_used(&pipe) < start_fill) {
