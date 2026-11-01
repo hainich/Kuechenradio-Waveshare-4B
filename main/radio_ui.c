@@ -91,12 +91,16 @@ static void refresh(lv_timer_t *timer)
             lv_slider_set_value(s_slider, cfg.volume, LV_ANIM_OFF);
         }
     }
-    if (radio_wifi_connected()) {
-        label_if_changed(s_status, radio_stream_status());
-    } else {
-        char wifi_state[96];
-        radio_wifi_diagnostic(wifi_state, sizeof(wifi_state));
-        label_if_changed(s_status, wifi_state);
+    /* Defer status-label redraws during slider gestures. Each invalidation
+     * competes with the continuously scanned RGB framebuffer. */
+    if (!lv_obj_has_state(s_slider, LV_STATE_PRESSED)) {
+        if (radio_wifi_connected()) {
+            label_if_changed(s_status, radio_stream_status());
+        } else {
+            char wifi_state[96];
+            radio_wifi_diagnostic(wifi_state, sizeof(wifi_state));
+            label_if_changed(s_status, wifi_state);
+        }
     }
     time_t now = time(NULL);
     struct tm t;
@@ -193,6 +197,7 @@ void radio_ui_start(void)
     lv_label_set_text(s_play_label, cfg.playing ? "II" : ">");
     s_last_rev = 0;
     refresh(NULL);
-    lv_timer_create(refresh, 1000, NULL);
+    /* Station/clock/status do not require a 1 Hz UI repaint check. */
+    lv_timer_create(refresh, 2000, NULL);
     bsp_display_unlock();
 }
