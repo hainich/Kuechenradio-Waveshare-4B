@@ -10,59 +10,68 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
 #include "esp_system.h"
+#include "bsp/esp32_s3_touch_lcd_4b.h"
 
 /*
- * Waveshare ESP32-S3-Touch-LCD-4B BOOT button: GPIO0 (active-low).
- * Restart ONLY after release so the ESP32-S3 does not enter ROM
- * download mode due to the GPIO0 bootstrapping pin being held low.
+ * Waveshare ESP32-S3-Touch-LCD-4B PWRKEY:
+ * TCA9554 P4 / EXIO4 (active low), NOT an ESP32 GPIO.
+ *
+ * Poll at 12.5 Hz with low priority to minimize shared I2C activity.
+ * Short press + release => software reboot. Long press remains available
+ * to the AXP2101 PMIC's hardware power-management function.
  */
-static void boot_button_restart_task(void *arg)
+static void power_button_restart_task(void *arg)
 {
     (void)arg;
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << GPIO_NUM_0,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    if (gpio_config(&cfg) != ESP_OK) {
-        ESP_LOGE("kuechenradio", "BOOT-Taste GPIO0 konnte nicht eingerichtet werden");
+    esp_io_expander_handle_t expander = bsp_io_expander_init();
+    if (!expander) {
+        ESP_LOGE("kuechenradio", "PWR-Taste: I2C-Expander nicht gefunden");
         vTaskDelete(NULL);
         return;
     }
 
-    /* Don't interpret a button that was held during power-on as a click. */
-    bool released_since_boot = false;
+    const uint32_t key_mask = IO_EXPANDER_PIN_NUM_4;
+    if (esp_io_expander_set_dir(expander, key_mask, IO_EXPANDER_INPUT) != ESP_OK) {
+        ESP_LOGE("kuechenradio", "PWR-Taste: Eingang EXIO4 konnte nicht aktiviert werden");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    bool ready = false;
+    bool was_pressed = false;
+    TickType_t pressed_at = 0;
+    const TickType_t min_press = pdMS_TO_TICKS(100);
+    const TickType_t max_press = pdMS_TO_TICKS(2000);
+
     for (;;) {
-        if (gpio_get_level(GPIO_NUM_0) != 0) {
-            released_since_boot = true;
-            vTaskDelay(pdMS_TO_TICKS(30));
-            continue;
-        }
-        if (!released_since_boot) {
-            vTaskDelay(pdMS_TO_TICKS(30));
+        uint32_t level = key_mask;
+        if (esp_io_expander_get_level(expander, key_mask, &level) != ESP_OK) {
+            /* Skip failed I2C reads instead of treating them as button presses. */
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        /* Debounce: the key must stay down for >=90ms. */
-        vTaskDelay(pdMS_TO_TICKS(90));
-        if (gpio_get_level(GPIO_NUM_0) != 0) continue;
+        bool pressed = (level & key_mask) == 0;
+        TickType_t now = xTaskGetTickCount();
 
-        /* Restart only when GPIO0 is HIGH again (normal boot mode). */
-        while (gpio_get_level(GPIO_NUM_0) == 0) {
-            vTaskDelay(pdMS_TO_TICKS(20));
+        /* Never restart on a button held before firmware initialization. */
+        if (!ready) {
+            if (!pressed) ready = true;
+        } else if (pressed && !was_pressed) {
+            pressed_at = now;
+        } else if (!pressed && was_pressed) {
+            TickType_t held = now - pressed_at;
+            if (held >= min_press && held < max_press) {
+                ESP_LOGW("kuechenradio", "PWR-Taste kurz gedrueckt: Neustart");
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(60));
-        if (gpio_get_level(GPIO_NUM_0) != 0) {
-            ESP_LOGW("kuechenradio", "BOOT-Taste losgelassen: Neustart");
-            esp_restart();
-        }
+        was_pressed = pressed;
+        vTaskDelay(pdMS_TO_TICKS(80));
     }
 }
-
 
 void app_main(void)
 {
@@ -82,8 +91,8 @@ void app_main(void)
     esp_sntp_init();
     radio_stream_start();
     radio_ui_start();
-    if (xTaskCreate(boot_button_restart_task, "boot_restart", 2048, NULL, 2, NULL) != pdPASS) {
-        ESP_LOGE("kuechenradio", "BOOT-Tasten-Task konnte nicht gestartet werden");
+    if (xTaskCreate(power_button_restart_task, "pwr_restart", 3072, NULL, 1, NULL) != pdPASS) {
+        ESP_LOGE("kuechenradio", "PWR-Tasten-Task konnte nicht gestartet werden");
     }
     ESP_LOGI("kuechenradio", "Start abgeschlossen");
 }
