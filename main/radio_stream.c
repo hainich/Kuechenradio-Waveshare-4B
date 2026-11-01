@@ -1,8 +1,8 @@
 /*
  * Kuechenradio: internet streams decoded with Espressif esp_audio_codec,
  * output through the Waveshare ES8311 board support (ESP Codec Dev).
- * The entire audio pipeline is pinned to core 0, leaving core 1 available
- * for the RGB display and touch/LVGL handling.
+ * Network reception and audio decoding run on core 1 to avoid competing
+ * with the RGB bounce-buffer ISR installed by app_main on core 0.
  */
 #include "radio_stream.h"
 #include "radio_config.h"
@@ -37,12 +37,12 @@
 #define AUDIO_PCM_MAX_CAPACITY 65536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
 #define AUDIO_NETWORK_PACKET 1024
-/* Core 1 is reserved for responsive LVGL touch/display work. On core 0 the
- * HTTP producer runs ahead of the audio consumer when data is available;
- * both stay below ESP-IDF's high-priority Wi-Fi/TCP/IP system tasks. */
-#define RADIO_AUDIO_CORE 0
-#define RADIO_AUDIO_PRIORITY 4
-#define RADIO_HTTP_PRIORITY 5
+/* Keep continuously running network/codec work away from the LCD interrupt
+ * created on core 0; give the HTTP producer headroom over the decoder.
+ * LVGL retains its original unpinned affinity (-1) from firmware #36. */
+#define RADIO_AUDIO_CORE 1
+#define RADIO_AUDIO_PRIORITY 6
+#define RADIO_HTTP_PRIORITY 8
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -538,8 +538,8 @@ void radio_stream_start(void)
         status_set("ES8311 nicht gefunden");
         return;
     }
-    /* Audio used to run on core 1 at priority 5 and could monopolize the
-     * same core as LVGL. Keep all radio CPU work on core 0 instead. */
+    /* Recovery experiment: place HTTP/decoder on core 1; LVGL remains
+     * unpinned so the other core can run touch and UI work when available. */
     BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "radio_audio", 24576,
                                             NULL, RADIO_AUDIO_PRIORITY, NULL, RADIO_AUDIO_CORE);
     ESP_LOGI(TAG, "Audiotask: core %d priority %d; HTTP: core %d priority %d",
