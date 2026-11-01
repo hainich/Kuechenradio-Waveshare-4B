@@ -9,6 +9,7 @@
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include "radio_power_button.h"
 #include "esp_timer.h"
 #include "radio_diag.h"
 
@@ -107,6 +108,14 @@ static void refresh(lv_timer_t *timer)
     else snprintf(clock_text, sizeof(clock_text), "--:--");
     label_if_changed(s_clock, clock_text);
 }
+static void power_button_check(lv_timer_t *timer)
+{
+    (void)timer;
+    /* AXP2101 latches PKEY short-press status until acknowledged. Polling
+     * at 250 ms does not require another FreeRTOS task/stack in scarce SRAM. */
+    radio_power_button_poll();
+}
+
 void radio_ui_start(void)
 {
     /* ESP LVGL port defaults to task_affinity=-1 (either CPU). Allow LVGL to run on either CPU again: pinning it to core 1 caused
@@ -195,5 +204,7 @@ void radio_ui_start(void)
     s_last_rev = 0;
     refresh(NULL);
     lv_timer_create(refresh, 1000, NULL);
+    radio_power_button_init();
+    lv_timer_create(power_button_check, 250, NULL);
     bsp_display_unlock();
 }
