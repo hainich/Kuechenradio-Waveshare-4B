@@ -188,12 +188,6 @@ typedef struct {
     atomic_bool eof;
 } audio_pipe_t;
 
-/* One persistent HTTP task, created at radio startup instead of creating
- * and deleting an 8-KiB FreeRTOS stack at every station change. This avoids
- * the observed SRAM fragmentation and delayed idle-task TCB reclamation. */
-static TaskHandle_t s_http_worker = NULL;
-static audio_pipe_t *s_http_active = NULL;
-
 static size_t pipe_used(audio_pipe_t *pipe)
 {
     xSemaphoreTake(pipe->mu, portMAX_DELAY);
@@ -232,17 +226,11 @@ static size_t pipe_write(audio_pipe_t *pipe, const uint8_t *src, size_t count)
 
 static void http_receiver_task(void *arg)
 {
-    (void)arg;
+    audio_pipe_t *pipe = (audio_pipe_t *)arg;
     uint8_t packet[AUDIO_NETWORK_PACKET];
-    for (;;) {
-        /* Audio task supplies a new live pipe through a FreeRTOS notification.
-         * The previous session is fully finished before the next notification. */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        audio_pipe_t *pipe = s_http_active;
-        if (!pipe) continue;
-        int64_t last_payload_us = esp_timer_get_time();
-        int64_t last_warning_us = last_payload_us;
-        while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
+    int64_t last_payload_us = esp_timer_get_time();
+    int64_t last_warning_us = last_payload_us;
+    while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -277,10 +265,9 @@ static void http_receiver_task(void *arg)
             break;
         }
     }
-        atomic_store(&pipe->eof, true);
-        xSemaphoreGive(pipe->finished);
-        /* Never delete this worker: its 8-KiB stack remains allocated once. */
-    }
+    atomic_store(&pipe->eof, true);
+    xSemaphoreGive(pipe->finished);
+    vTaskDelete(NULL);
 }
 
 static void play_stream(const char *url, uint32_t revision)
@@ -340,51 +327,69 @@ static void play_stream(const char *url, uint32_t revision)
         goto done;
     }
 
-    /* Worker stack is reserved ONCE during startup. The FIFO is still
-     * session-local, but station changes no longer allocate/free task
-     * stacks or depend on the idle task to reclaim their TCBs.
-     * PSRAM fallback handles a fragmented internal heap. */
+    /* Give the HTTP task and its stack first claim on scarce INTERNAL RAM.
+     * The PCM/mono workspaces above are now in PSRAM. The original code
+     * allocated both as malloc(16384), then rejected all FIFO choices if
+     * largest_free_block < capacity + 8192; hardware fell back to direct
+     * HTTP reads, leaving decoder and I2S starved for seconds.
+     *
+     * Allocate actual FIFO block and task instead of assuming that a single
+     * contiguous block must fit both (these allocations are separate).
+     * Prefer a moderate SRAM FIFO.  If SRAM fragmentation still prevents
+     * that, a 24-KiB PSRAM FIFO is safer than *no* independent HTTP task.
+     * Direct-HTTP path remains a final recovery fallback only. */
     const size_t fifo_sizes[] = {16384, 12288, 8192, 4096};
     const size_t psram_fifo_sizes[] = {24576, 16384, 8192};
-    ESP_LOGI(TAG, "Before FIFO: internal free=%u largest=%u, PSRAM free=%u; worker=%s",
+    ESP_LOGI(TAG, "Before FIFO: internal free=%u largest=%u, PSRAM free=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-             s_http_worker ? "READY" : "MISSING");
-    if (s_http_worker) {
-        for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
-            size_t capacity = fifo_sizes[i];
-            fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-            if (!fifo_storage) continue;
-            audio_ring_init(&pipe.ring, fifo_storage, capacity);
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
+        size_t capacity = fifo_sizes[i];
+        fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!fifo_storage) continue;
+        audio_ring_init(&pipe.ring, fifo_storage, capacity);
+        if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
+                                    &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
             radio_diag_fifo(0, (uint32_t)capacity);
             radio_diag_note(RD_AUDIO_FIFO_INTERNAL, (uint32_t)capacity, 0);
-            ESP_LOGI(TAG, "Persistent HTTP task / internal FIFO %u B", (unsigned)capacity);
+            ESP_LOGI(TAG, "HTTP task ACTIVE, internal SRAM audio FIFO: %u B",
+                     (unsigned)capacity);
             break;
         }
-        if (!receiver_started) {
-            for (size_t i = 0; i < sizeof(psram_fifo_sizes) / sizeof(psram_fifo_sizes[0]); ++i) {
-                size_t capacity = psram_fifo_sizes[i];
-                fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (!fifo_storage) continue;
-                audio_ring_init(&pipe.ring, fifo_storage, capacity);
+        heap_caps_free(fifo_storage);
+        fifo_storage = NULL;
+    }
+    if (!receiver_started) {
+        /* Only fallback to PSRAM when the internal ring+HTTP stack cannot
+         * both be allocated. The compressed data rate is far below the
+         * 480x480 RGB scanout bandwidth. Keep this FIFO modest. */
+        for (size_t i = 0; i < sizeof(psram_fifo_sizes) / sizeof(psram_fifo_sizes[0]); ++i) {
+            size_t capacity = psram_fifo_sizes[i];
+            fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!fifo_storage) continue;
+            audio_ring_init(&pipe.ring, fifo_storage, capacity);
+            if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
+                                        &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
                 receiver_started = true;
                 radio_diag_fifo(0, (uint32_t)capacity);
                 radio_diag_note(RD_AUDIO_FIFO_PSRAM, (uint32_t)capacity, 0);
-                ESP_LOGW(TAG, "Persistent HTTP task / PSRAM FIFO %u B", (unsigned)capacity);
+                ESP_LOGW(TAG, "HTTP task ACTIVE, PSRAM fallback audio FIFO: %u B",
+                         (unsigned)capacity);
                 break;
             }
+            heap_caps_free(fifo_storage);
+            fifo_storage = NULL;
         }
     }
-    if (receiver_started) {
-        s_http_active = &pipe;
-        xTaskNotifyGive(s_http_worker);
-    } else {
+    if (!receiver_started) {
         radio_diag_fifo(0, 0);
         radio_diag_note(RD_AUDIO_DIRECT, 0,
                         (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        ESP_LOGE(TAG, "Persistent HTTP worker/FIFO unavailable; direct fallback");
+        ESP_LOGE(TAG, "HTTP task still unavailable: internal free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 
     /* Old half-FIFO refill forced about one second of silence at 128 kbps
@@ -547,13 +552,9 @@ done:
     radio_diag_note(RD_STREAM_END, underruns, 0);
     if (receiver_started) {
         atomic_store(&pipe.stop, true);
-        /* HTTP task explicitly acknowledges it no longer dereferences the
-         * stack-local pipe before we release its mutex, FIFO or HTTP handle. */
         xSemaphoreTake(pipe.finished, portMAX_DELAY);
-        s_http_active = NULL;
         ESP_LOGI(TAG, "Audiopuffer-Unterlaeufe: %u", underruns);
     }
-    radio_diag_fifo(0, 0);
     if (opened) esp_codec_dev_close(s_speaker);
     if (decoder) esp_audio_simple_dec_close(decoder);
     esp_http_client_cleanup(http);
@@ -593,12 +594,7 @@ static void stream_task(void *arg)
         uint32_t revision = radio_config_revision();
         status_set("Verbinde mit Sender ...");
         play_stream(cfg.stations[cfg.station].url, revision);
-        /* A user-triggered change must not incur the reconnect backoff.
-         * Keep the 1500-ms delay for genuine stream/network failures. */
-        if (radio_config_revision() != revision)
-            vTaskDelay(pdMS_TO_TICKS(10));
-        else
-            vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(1500));
     }
 }
 
@@ -614,15 +610,8 @@ void radio_stream_start(void)
         status_set("ES8311 nicht gefunden");
         return;
     }
-    /* Reserve the HTTP worker stack once, before the audio stream begins
-     * allocating decoders and other transient workspaces. */
-    if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
-                                NULL, RADIO_HTTP_PRIORITY,
-                                &s_http_worker, RADIO_AUDIO_CORE) != pdPASS) {
-        s_http_worker = NULL;
-        ESP_LOGE(TAG, "Persistent HTTP worker could not be created at startup");
-    }
-    /* Keep the core/priority mapping of firmware #49 unchanged. */
+    /* Audio used to run on core 1 at priority 5 and could monopolize the
+     * same core as LVGL. Keep all radio CPU work on core 0 instead. */
     BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "radio_audio", 24576,
                                             NULL, RADIO_AUDIO_PRIORITY, NULL, RADIO_AUDIO_CORE);
     ESP_LOGI(TAG, "Audiotask: core %d priority %d; HTTP: core %d priority %d",

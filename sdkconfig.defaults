@@ -15,6 +15,9 @@ CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=50
 # Keep one RGB framebuffer: the double-buffer anti-tearing experiment worsened
 # interference during MP3 playback on the physical Waveshare 4B.
 CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1
+# Espressif ESP-IDF 5.5: automatically restart LCD RGB DMA at VSYNC if
+# PSRAM bandwidth contention desynchronizes RGB scanout (horizontal shift).
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
 # CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR is not set
 # CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE is not set
 # Espressif's documented mitigations for RGB DMA starvation and screen drift.
