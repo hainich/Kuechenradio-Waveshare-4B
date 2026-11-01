@@ -15,6 +15,12 @@ CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=50
 # Keep one RGB framebuffer: the double-buffer anti-tearing experiment worsened
 # interference during MP3 playback on the physical Waveshare 4B.
 CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1
+# Waveshare BSP's RGB panel allocates two SRAM bounce buffers of this height.
+CONFIG_BSP_LCD_RGB_BOUNCE_BUFFER_HEIGHT=20
+# Espressif recommends 64-byte cache lines for RGB PSRAM bounce-buffer copies.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+# Recover from RGB DMA/VSYNC loss rather than leaving the picture shifted.
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
 # CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR is not set
 # CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE is not set
 # Espressif's documented mitigations for RGB DMA starvation and screen drift.
