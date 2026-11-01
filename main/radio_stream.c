@@ -53,7 +53,9 @@ static void status_set(const char *str)
 {
     if (!s_status_mu) return;
     xSemaphoreTake(s_status_mu, portMAX_DELAY);
-    snprintf(s_status, sizeof(s_status), "%s", str);
+    if (strcmp(s_status, str) != 0) {
+        snprintf(s_status, sizeof(s_status), "%s", str);
+    }
     xSemaphoreGive(s_status_mu);
 }
 const char *radio_stream_status(void)
