@@ -1,7 +1,7 @@
 name: ESP32-S3 Küchenradio Firmware
 on:
   push:
-    branches: [main, audio-atlascube-codecs]
+    branches: [main, audio-atlascube-codecs, radio-engine-rebuild]
   workflow_dispatch:
 permissions:
   contents: read
