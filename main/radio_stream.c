@@ -333,8 +333,8 @@ static void play_stream(const char *url, uint32_t revision)
     while (wanted(revision)) {
         int n;
         if (receiver_started) {
-            if (pipe_used(&pipe) < radio_engine_low_watermark(pipe.ring.capacity) && !atomic_load(&pipe.eof)) {
-                /* Refill before complete starvation; avoid repeated audible gaps. */
+            if (pipe_used(&pipe) == 0) {
+                if (atomic_load(&pipe.eof)) break;
                 if (!buffering) {
                     ++underruns;
                     buffering = true;
