@@ -22,6 +22,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "esp_codec_dev.h"
 
@@ -222,7 +223,8 @@ static void http_receiver_task(void *arg)
 {
     audio_pipe_t *pipe = (audio_pipe_t *)arg;
     uint8_t packet[AUDIO_NETWORK_PACKET];
-    unsigned read_timeouts = 0;
+    int64_t last_payload_us = esp_timer_get_time();
+    int64_t last_warning_us = last_payload_us;
     while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -230,15 +232,25 @@ static void http_receiver_task(void *arg)
         }
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
         if (n > 0) {
-            read_timeouts = 0;
+            last_payload_us = esp_timer_get_time();
             /* Only the consumer can change free space, and it increases it. */
             if (pipe_write(pipe, packet, (size_t)n) != (size_t)n) {
                 ESP_LOGE(TAG, "Audio FIFO overflow");
                 break;
             }
-        } else if (n == 0 && ++read_timeouts < 3) {
-            /* A transient HTTP read timeout is not necessarily stream EOF. */
-            ESP_LOGW(TAG, "HTTP stream timeout (%u/3)", read_timeouts);
+        } else if (n == 0 || n == -ESP_ERR_HTTP_EAGAIN) {
+            /* Live radio may temporarily supply no payload. Do not treat
+             * a few consecutive zero/EAGAIN reads as a finished stream. */
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_payload_us >= 12000000LL) {
+                ESP_LOGW(TAG, "HTTP stream stalled for 12 s; reconnecting");
+                break;
+            }
+            if (now_us - last_warning_us >= 10000000LL) {
+                ESP_LOGW(TAG, "HTTP waiting for live stream payload");
+                last_warning_us = now_us;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
         } else {
             ESP_LOGW(TAG, "HTTP stream ended: %d", n);
             break;
@@ -318,7 +330,9 @@ static void play_stream(const char *url, uint32_t revision)
         ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
-    size_t refill = receiver_started ? pipe.ring.capacity / 2 : 0;
+    /* Old half-FIFO refill forced about one second of silence at 128 kbps
+     * (16384 bytes at the largest FIFO). Keep this short and bounded. */
+    const size_t refill = receiver_started ? 2048 : 0;
     if (receiver_started) {
         size_t start_fill = pipe.ring.capacity * 3 / 4;
         status_set("Puffert Audiostream ...");
@@ -340,8 +354,10 @@ static void play_stream(const char *url, uint32_t revision)
                     status_set("Puffert Audiostream ...");
                     ESP_LOGW(TAG, "Audio FIFO underrun %u", underruns);
                 }
+                TickType_t refill_started = xTaskGetTickCount();
                 while (wanted(revision) && !atomic_load(&pipe.eof) &&
-                       pipe_used(&pipe) < refill) {
+                       pipe_used(&pipe) < refill &&
+                       xTaskGetTickCount() - refill_started < pdMS_TO_TICKS(100)) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 if (!wanted(revision)) break;
