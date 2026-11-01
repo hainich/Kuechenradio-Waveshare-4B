@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "audio_ring.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -52,7 +53,7 @@ static void status_set(const char *str)
 {
     if (!s_status_mu) return;
     xSemaphoreTake(s_status_mu, portMAX_DELAY);
-    snprintf(s_status, sizeof(s_status), "%s", str);
+    if (strcmp(s_status, str) != 0) snprintf(s_status, sizeof(s_status), "%s", str);
     xSemaphoreGive(s_status_mu);
 }
 const char *radio_stream_status(void)
@@ -223,6 +224,7 @@ static void http_receiver_task(void *arg)
     audio_pipe_t *pipe = (audio_pipe_t *)arg;
     uint8_t packet[AUDIO_NETWORK_PACKET];
     unsigned read_timeouts = 0;
+    TickType_t last_payload = xTaskGetTickCount();
     while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -231,14 +233,19 @@ static void http_receiver_task(void *arg)
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
         if (n > 0) {
             read_timeouts = 0;
+            last_payload = xTaskGetTickCount();
             /* Only the consumer can change free space, and it increases it. */
             if (pipe_write(pipe, packet, (size_t)n) != (size_t)n) {
                 ESP_LOGE(TAG, "Audio FIFO overflow");
                 break;
             }
-        } else if (n == 0 && ++read_timeouts < 3) {
-            /* A transient HTTP read timeout is not necessarily stream EOF. */
-            ESP_LOGW(TAG, "HTTP stream timeout (%u/3)", read_timeouts);
+        } else if (n == 0 && !esp_http_client_is_complete_data_received(pipe->http) &&
+                   (xTaskGetTickCount() - last_payload) < pdMS_TO_TICKS(12000)) {
+            /* A short read with no bytes is not EOF for a live stream. */
+            if (++read_timeouts % 5 == 0) {
+                ESP_LOGW(TAG, "HTTP no payload for %u reads", read_timeouts);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
         } else {
             ESP_LOGW(TAG, "HTTP stream ended: %d", n);
             break;
@@ -271,6 +278,8 @@ static void play_stream(const char *url, uint32_t revision)
     int active_rate = 0;
     int volume_applied = -1;
     unsigned underruns = 0;
+    unsigned slow_writes = 0;
+    TickType_t last_audio_report = xTaskGetTickCount();
 
     atomic_init(&pipe.stop, false);
     atomic_init(&pipe.eof, false);
@@ -318,7 +327,10 @@ static void play_stream(const char *url, uint32_t revision)
         ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
-    size_t refill = receiver_started ? pipe.ring.capacity / 2 : 0;
+    /* Resume after a bounded amount of compressed audio, not half the FIFO.
+     * This shortens audible gaps after a temporary network starvation. */
+    size_t refill = receiver_started ? pipe.ring.capacity / 8 : 0;
+    if (refill > 4096) refill = 4096;
     if (receiver_started) {
         size_t start_fill = pipe.ring.capacity * 3 / 4;
         status_set("Puffert Audiostream ...");
@@ -328,7 +340,7 @@ static void play_stream(const char *url, uint32_t revision)
         }
     }
 
-    bool buffering = false;
+    bool buffering = true;
     while (wanted(revision)) {
         int n;
         if (receiver_started) {
@@ -438,14 +450,35 @@ static void play_stream(const char *url, uint32_t revision)
                                             (int32_t)stereo[i * 2 + 1]) / 2);
                     }
                 }
-                if (esp_codec_dev_write(s_speaker, mono,
-                                        (int)(samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+                int64_t write_start_us = esp_timer_get_time();
+                int write_result = esp_codec_dev_write(s_speaker, mono,
+                                       (int)(samples * sizeof(int16_t)));
+                int64_t write_ms = (esp_timer_get_time() - write_start_us) / 1000;
+                if (write_ms > 150) {
+                    ++slow_writes;
+                    if (slow_writes <= 3 || slow_writes % 20 == 0) {
+                        ESP_LOGW(TAG, "Slow codec/I2S write: %lld ms (%u total)",
+                                 (long long)write_ms, slow_writes);
+                    }
+                }
+                if (write_result != ESP_CODEC_DEV_OK) {
                     status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
-                if (buffering) status_set("Spielt");
-                buffering = false;
-                status_set("Spielt");
+                if (buffering) {
+                    status_set("Spielt");
+                    buffering = false;
+                }
+                TickType_t now = xTaskGetTickCount();
+                if (now - last_audio_report >= pdMS_TO_TICKS(30000)) {
+                    last_audio_report = now;
+                    size_t fifo_bytes = receiver_started ? pipe_used(&pipe) : 0;
+                    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                    ESP_LOGI(TAG, "Audio health: FIFO=%u/%u; underruns=%u; slow I2S=%u; internal largest=%u",
+                             (unsigned)fifo_bytes,
+                             (unsigned)(receiver_started ? pipe.ring.capacity : 0),
+                             underruns, slow_writes, (unsigned)largest);
+                }
             }
             if (raw.consumed > raw.len) {
                 ESP_LOGE(TAG, "Decoder invalid consumed size");
