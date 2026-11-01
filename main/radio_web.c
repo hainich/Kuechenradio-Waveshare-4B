@@ -169,14 +169,17 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / Basis Firmware #49 / Nur Messinstrumentierung\n");
+    REPORT("KUECHENRADIO DIAGNOSE / SRAM-FIFO-Korrektur auf Basis #49\n");
     REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\n",
            (unsigned long)(d.uptime_ms / 1000), (int)esp_reset_reason(),
            radio_wifi_connected() ? "ja" : "nein");
-    REPORT("Intern frei: %lu B | groesster Block: %lu B\n",
+    REPORT("Intern frei: %lu B | groesster Block: %lu B | PSRAM frei: %lu B\n",
            (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-           (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    REPORT("Puffer: %lu / %lu B | Underruns: %lu | Audio-Luecken >=250ms: %lu (Maximum %lu ms)\n",
+           (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    REPORT("HTTP-Task/Puffer: %s | Fuellung: %lu / %lu B | Underruns: %lu | Audio-Luecken >=250ms: %lu (Maximum %lu ms)\n",
+           d.fifo_backend == 1 ? "AKTIV (interner RAM)" :
+           d.fifo_backend == 2 ? "AKTIV (PSRAM)" : "INAKTIV (direkter HTTP-Empfang)",
            (unsigned long)d.fifo_bytes, (unsigned long)d.fifo_capacity,
            (unsigned long)d.fifo_underruns, (unsigned long)d.audio_gaps,
            (unsigned long)d.audio_gap_max_ms);

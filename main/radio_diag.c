@@ -57,6 +57,9 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
     case RD_WIFI_LOST: ++s_diag.wifi_disconnects; break;
     case RD_STREAM_START: ++s_diag.stream_starts; break;
     case RD_STREAM_END: ++s_diag.stream_ends; break;
+    case RD_AUDIO_FIFO_INTERNAL: s_diag.fifo_backend = 1; break;
+    case RD_AUDIO_FIFO_PSRAM: s_diag.fifo_backend = 2; break;
+    case RD_AUDIO_DIRECT: s_diag.fifo_backend = 0; break;
     default: break;
     }
     taskEXIT_CRITICAL(&s_diag_lock);
@@ -166,6 +169,8 @@ const char *radio_diag_name(radio_diag_kind_t kind)
     case RD_STREAM_END: return "STREAM_END";
     case RD_STREAM_OPEN_FAILED: return "STREAM_OPEN_FAILED";
     case RD_AUDIO_DIRECT: return "AUDIO_DIRECT_HTTP_FALLBACK";
+    case RD_AUDIO_FIFO_INTERNAL: return "HTTP_FIFO_INTERNAL";
+    case RD_AUDIO_FIFO_PSRAM: return "HTTP_FIFO_PSRAM";
     default: return "UNKNOWN";
     }
 }

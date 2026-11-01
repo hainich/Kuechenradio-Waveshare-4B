@@ -21,7 +21,9 @@ typedef enum {
     RD_STREAM_START,
     RD_STREAM_END,
     RD_STREAM_OPEN_FAILED,
-    RD_AUDIO_DIRECT
+    RD_AUDIO_DIRECT,
+    RD_AUDIO_FIFO_INTERNAL,
+    RD_AUDIO_FIFO_PSRAM
 } radio_diag_kind_t;
 
 typedef struct {
@@ -51,6 +53,7 @@ typedef struct {
     uint32_t audio_gap_max_ms;
     uint32_t fifo_capacity;
     uint32_t fifo_bytes;
+    uint32_t fifo_backend; /* 0=direct, 1=internal, 2=PSRAM */
     uint32_t fifo_underruns;
     uint32_t audio_gaps;
     uint32_t decoder_slow;

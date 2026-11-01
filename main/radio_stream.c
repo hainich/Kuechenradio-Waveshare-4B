@@ -281,9 +281,16 @@ static void play_stream(const char *url, uint32_t revision)
     }
     radio_diag_note(RD_STREAM_START, 0, 0);
 
+    /* ESP-IDF's malloc() prefers internal RAM for 16-KiB blocks with our
+     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384. Two scratch buffers consumed
+     * the internal heap needed by the HTTP receiver and audio FIFO.
+     * The scratch PCM/mono buffers are not DMA descriptors; the codec writer
+     * copies PCM to its own I2S driver buffers. Put them in external PSRAM. */
     uint8_t *encoded = malloc(AUDIO_READ_SIZE);
-    uint8_t *pcm = malloc(AUDIO_PCM_CAPACITY);
-    int16_t *mono = malloc(AUDIO_PCM_CAPACITY);
+    uint8_t *pcm = heap_caps_malloc(AUDIO_PCM_CAPACITY,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int16_t *mono = heap_caps_malloc(AUDIO_PCM_CAPACITY,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint32_t pcm_capacity = AUDIO_PCM_CAPACITY;
     uint32_t mono_capacity = AUDIO_PCM_CAPACITY;
     esp_audio_simple_dec_handle_t decoder = NULL;
@@ -300,6 +307,9 @@ static void play_stream(const char *url, uint32_t revision)
     pipe.mu = xSemaphoreCreateMutex();
     pipe.finished = xSemaphoreCreateBinary();
     if (!encoded || !pcm || !mono || !pipe.mu || !pipe.finished) {
+        ESP_LOGE(TAG, "Audio-Workbuffers: encoded=%p PCM=%p mono=%p, PSRAM free=%u",
+                 (void *)encoded, (void *)pcm, (void *)mono,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         status_set("Zu wenig RAM fuer Audio");
         goto done;
     }
@@ -317,13 +327,25 @@ static void play_stream(const char *url, uint32_t revision)
         goto done;
     }
 
-    /* Keep the network producer independent of I2S and decoding. Internal SRAM
-       avoids the PSRAM contention observed with the previous large audio FIFO. */
-    const size_t fifo_sizes[] = {32768, 24576, 16384, 12288, 8192};
+    /* Give the HTTP task and its stack first claim on scarce INTERNAL RAM.
+     * The PCM/mono workspaces above are now in PSRAM. The original code
+     * allocated both as malloc(16384), then rejected all FIFO choices if
+     * largest_free_block < capacity + 8192; hardware fell back to direct
+     * HTTP reads, leaving decoder and I2S starved for seconds.
+     *
+     * Allocate actual FIFO block and task instead of assuming that a single
+     * contiguous block must fit both (these allocations are separate).
+     * Prefer a moderate SRAM FIFO.  If SRAM fragmentation still prevents
+     * that, a 24-KiB PSRAM FIFO is safer than *no* independent HTTP task.
+     * Direct-HTTP path remains a final recovery fallback only. */
+    const size_t fifo_sizes[] = {16384, 12288, 8192, 4096};
+    const size_t psram_fifo_sizes[] = {24576, 16384, 8192};
+    ESP_LOGI(TAG, "Before FIFO: internal free=%u largest=%u, PSRAM free=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
         size_t capacity = fifo_sizes[i];
-        if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-            < capacity + 8192) continue;
         fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!fifo_storage) continue;
         audio_ring_init(&pipe.ring, fifo_storage, capacity);
@@ -331,7 +353,8 @@ static void play_stream(const char *url, uint32_t revision)
                                     &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
             radio_diag_fifo(0, (uint32_t)capacity);
-            ESP_LOGI(TAG, "HTTP/I2S getrennt; interner Audiopuffer: %u Bytes",
+            radio_diag_note(RD_AUDIO_FIFO_INTERNAL, (uint32_t)capacity, 0);
+            ESP_LOGI(TAG, "HTTP task ACTIVE, internal SRAM audio FIFO: %u B",
                      (unsigned)capacity);
             break;
         }
@@ -339,8 +362,34 @@ static void play_stream(const char *url, uint32_t revision)
         fifo_storage = NULL;
     }
     if (!receiver_started) {
-        radio_diag_note(RD_AUDIO_DIRECT, 0, 0);
-        ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
+        /* Only fallback to PSRAM when the internal ring+HTTP stack cannot
+         * both be allocated. The compressed data rate is far below the
+         * 480x480 RGB scanout bandwidth. Keep this FIFO modest. */
+        for (size_t i = 0; i < sizeof(psram_fifo_sizes) / sizeof(psram_fifo_sizes[0]); ++i) {
+            size_t capacity = psram_fifo_sizes[i];
+            fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!fifo_storage) continue;
+            audio_ring_init(&pipe.ring, fifo_storage, capacity);
+            if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
+                                        &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
+                receiver_started = true;
+                radio_diag_fifo(0, (uint32_t)capacity);
+                radio_diag_note(RD_AUDIO_FIFO_PSRAM, (uint32_t)capacity, 0);
+                ESP_LOGW(TAG, "HTTP task ACTIVE, PSRAM fallback audio FIFO: %u B",
+                         (unsigned)capacity);
+                break;
+            }
+            heap_caps_free(fifo_storage);
+            fifo_storage = NULL;
+        }
+    }
+    if (!receiver_started) {
+        radio_diag_fifo(0, 0);
+        radio_diag_note(RD_AUDIO_DIRECT, 0,
+                        (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        ESP_LOGE(TAG, "HTTP task still unavailable: internal free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 
     /* Old half-FIFO refill forced about one second of silence at 128 kbps
@@ -401,7 +450,8 @@ static void play_stream(const char *url, uint32_t revision)
             if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
                 out.needed_size > pcm_capacity &&
                 out.needed_size <= AUDIO_PCM_MAX_CAPACITY) {
-                uint8_t *bigger = realloc(pcm, out.needed_size);
+                uint8_t *bigger = heap_caps_realloc(pcm, out.needed_size,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!bigger) {
                     status_set("Zu wenig RAM fuer Decoder");
                     goto done;
@@ -428,7 +478,8 @@ static void play_stream(const char *url, uint32_t revision)
                 size_t samples = out.decoded_size / (info.channel * sizeof(int16_t));
                 if (samples * sizeof(int16_t) > mono_capacity) {
                     uint32_t needed = (uint32_t)(samples * sizeof(int16_t));
-                    int16_t *bigger = realloc(mono, needed);
+                    int16_t *bigger = heap_caps_realloc(mono, needed,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                     if (!bigger) {
                         status_set("Zu wenig RAM fuer Audio");
                         goto done;
@@ -511,8 +562,8 @@ done:
     if (pipe.mu) vSemaphoreDelete(pipe.mu);
     heap_caps_free(fifo_storage);
     free(encoded);
-    free(pcm);
-    free(mono);
+    heap_caps_free(pcm);
+    heap_caps_free(mono);
 }
 
 static void stream_task(void *arg)
