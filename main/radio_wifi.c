@@ -59,6 +59,9 @@ static void wifi_fallback_task(void *arg)
     (void)arg;
     unsigned disconnected_seconds = 0;
     for (;;) {
+        /* Coalesce touch-driven UI saves using this already-existing low
+         * priority task, rather than allocating another SRAM task stack. */
+        radio_config_ui_persist_poll();
         if (s_connected) {
             disconnected_seconds = 0;
         } else if (s_home_configured && !s_setup_ap_active) {
@@ -130,11 +133,13 @@ void radio_wifi_start(void)
             ESP_LOGW(TAG, "WLAN Power Save konnte nicht deaktiviert werden: %s", esp_err_to_name(err));
         }
         ESP_LOGI(TAG, "Verbinde mit Heim-WLAN '%s' im STA-Modus", cfg.ssid);
-        if (xTaskCreate(wifi_fallback_task, "wifi_fallback", 3072, NULL, 2, NULL) != pdPASS) {
-            ESP_LOGE(TAG, "WLAN-Setup-Rueckfalltask konnte nicht starten");
-        }
     } else {
         ESP_LOGI(TAG, "Ersteinrichtung: Setup WLAN %s / http://192.168.4.1", RADIO_AP_SSID);
+    }
+    /* Run housekeeping in both STA and initial-setup modes. This task
+     * existed before #61; only its existing loop gains deferred UI saves. */
+    if (xTaskCreate(wifi_fallback_task, "wifi_fallback", 3072, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "WLAN-Housekeeping task konnte nicht starten");
     }
 }
 bool radio_wifi_connected(void) { return s_connected; }

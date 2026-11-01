@@ -171,6 +171,7 @@ const char *radio_diag_name(radio_diag_kind_t kind)
     case RD_AUDIO_DIRECT: return "AUDIO_DIRECT_HTTP_FALLBACK";
     case RD_AUDIO_FIFO_INTERNAL: return "HTTP_FIFO_INTERNAL";
     case RD_AUDIO_FIFO_PSRAM: return "HTTP_FIFO_PSRAM";
+    case RD_NVS_UI_SAVE: return "DEFERRED_NVS_SAVE";
     default: return "UNKNOWN";
     }
 }

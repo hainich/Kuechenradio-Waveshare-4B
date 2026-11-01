@@ -170,7 +170,7 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / SRAM-FIFO-Korrektur auf Basis #49\n");
+    REPORT("KUECHENRADIO DIAGNOSE / Build #61 Touch-Audio-Persistenz\n");
     REPORT("Physische PWR-Taste: %s\n", radio_power_button_status());
     REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\n",
            (unsigned long)(d.uptime_ms / 1000), (int)esp_reset_reason(),

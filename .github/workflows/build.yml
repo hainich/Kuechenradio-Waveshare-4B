@@ -1,7 +1,7 @@
 name: ESP32-S3 Küchenradio Firmware
 on:
   push:
-    branches: [main, audio-atlascube-codecs, audio-recovery-from-36, diagnose-from-49, fix-audio-memory-from-55, rollback56-pwr-from58]
+    branches: [main, audio-atlascube-codecs, audio-recovery-from-36, diagnose-from-49, fix-audio-memory-from-55, rollback56-pwr-from58, touch-audio-async-nvs-from60]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -40,6 +40,9 @@ jobs:
           grep -q 'xTaskCreatePinnedToCore(http_receiver_task' main/radio_stream.c
           grep -q 'esp_audio_simple_dec_process' main/radio_stream.c
           grep -q 'esp_codec_dev_write(s_speaker, pcm' main/radio_stream.c
+          grep -q 'radio_config_get_volume' main/radio_stream.c
+          grep -q 'radio_config_ui_persist_poll' main/radio_wifi.c
+          ! grep -q 'if (persist_now) persist(' main/radio_config.c
           ! grep -q 'int16_t \*mono' main/radio_stream.c
           grep -q 'radio_power_button_init' main/radio_ui.c
           grep -q 'esp_audio_dec_register_default' main/radio_stream.c

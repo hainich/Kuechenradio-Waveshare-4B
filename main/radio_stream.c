@@ -511,11 +511,10 @@ static void play_stream(const char *url, uint32_t revision)
                     active_rate = (int)info.sample_rate;
                     volume_applied = -1;
                 }
-                radio_settings_t settings;
-                radio_config_get(&settings);
-                if (volume_applied != settings.volume) {
-                    esp_codec_dev_set_out_vol(s_speaker, settings.volume);
-                    volume_applied = settings.volume;
+                uint8_t volume = radio_config_get_volume();
+                if (volume_applied != (int)volume) {
+                    esp_codec_dev_set_out_vol(s_speaker, volume);
+                    volume_applied = (int)volume;
                 }
                 /* In-place fold is safe: destination i always precedes both
                  * source indices 2*i and 2*i+1. For mono, no copy is needed. */

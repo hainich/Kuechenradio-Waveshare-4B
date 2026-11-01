@@ -20,6 +20,8 @@ typedef struct {
 } radio_settings_t;
 void radio_config_init(void);
 void radio_config_get(radio_settings_t *out);
+uint8_t radio_config_get_volume(void);
+void radio_config_ui_persist_poll(void);
 void radio_config_save(const radio_settings_t *settings);
 void radio_config_select(int index);
 void radio_config_volume(int volume, bool persist);

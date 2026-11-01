@@ -23,7 +23,8 @@ typedef enum {
     RD_STREAM_OPEN_FAILED,
     RD_AUDIO_DIRECT,
     RD_AUDIO_FIFO_INTERNAL,
-    RD_AUDIO_FIFO_PSRAM
+    RD_AUDIO_FIFO_PSRAM,
+    RD_NVS_UI_SAVE
 } radio_diag_kind_t;
 
 typedef struct {
