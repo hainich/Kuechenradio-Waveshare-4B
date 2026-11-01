@@ -93,13 +93,12 @@ static void refresh(lv_timer_t *timer)
 }
 void radio_ui_start(void)
 {
-    /* ESP LVGL port defaults to task_affinity=-1 (either CPU). Keep the
-     * display/touch task on core 1, away from HTTP, decoding and I2S on core 0.
-     * Do not change RGB framebuffer mode or I2S timing in this isolated test. */
+    /* ESP LVGL port defaults to task_affinity=-1 (either CPU). Allow LVGL to run on either CPU again: pinning it to core 1 caused
+     * repeated one-second audio interruptions in the hardware test. */
     bsp_display_cfg_t display_cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
     };
-    display_cfg.lvgl_port_cfg.task_affinity = 1;
+    display_cfg.lvgl_port_cfg.task_affinity = -1;
     lv_display_t *display = bsp_display_start_with_config(&display_cfg);
     if (!display) { ESP_LOGE("radio_ui", "Display init fehlgeschlagen"); return; }
     bsp_display_brightness_set(80);
