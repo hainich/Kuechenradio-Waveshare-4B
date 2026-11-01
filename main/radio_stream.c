@@ -283,6 +283,8 @@ static void play_stream(const char *url, uint32_t revision)
     int active_rate = 0;
     int volume_applied = -1;
     unsigned underruns = 0;
+    unsigned slow_codec_writes = 0;
+    int64_t last_health_log_us = esp_timer_get_time();
 
     atomic_init(&pipe.stop, false);
     atomic_init(&pipe.eof, false);
@@ -344,6 +346,20 @@ static void play_stream(const char *url, uint32_t revision)
 
     bool buffering = false;
     while (wanted(revision)) {
+        /* Diagnostic is intentionally low rate, with no logging in the
+         * latency-sensitive LCD interrupt or per received packet. */
+        int64_t health_now = esp_timer_get_time();
+        if (health_now - last_health_log_us >= 30000000LL) {
+            if (receiver_started) {
+                ESP_LOGI(TAG, "Audio health: FIFO=%u/%u, underruns=%u, slow codec writes=%u",
+                         (unsigned)pipe_used(&pipe), (unsigned)pipe.ring.capacity,
+                         underruns, slow_codec_writes);
+            } else {
+                ESP_LOGI(TAG, "Audio health: direct HTTP path; slow codec writes=%u",
+                         slow_codec_writes);
+            }
+            last_health_log_us = health_now;
+        }
         int n;
         if (receiver_started) {
             if (pipe_used(&pipe) == 0) {
@@ -454,8 +470,18 @@ static void play_stream(const char *url, uint32_t revision)
                                             (int32_t)stereo[i * 2 + 1]) / 2);
                     }
                 }
-                if (esp_codec_dev_write(s_speaker, mono,
-                                        (int)(samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+                int64_t write_start_us = esp_timer_get_time();
+                int write_result = esp_codec_dev_write(s_speaker, mono,
+                                        (int)(samples * sizeof(int16_t)));
+                int64_t write_elapsed_us = esp_timer_get_time() - write_start_us;
+                if (write_elapsed_us >= 150000LL) {
+                    ++slow_codec_writes;
+                    if (slow_codec_writes <= 3 || slow_codec_writes % 20 == 0) {
+                        ESP_LOGW(TAG, "Slow codec/I2S write: %lld ms (count=%u)",
+                                 (long long)(write_elapsed_us / 1000), slow_codec_writes);
+                    }
+                }
+                if (write_result != ESP_CODEC_DEV_OK) {
                     status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
