@@ -22,6 +22,10 @@ CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# ESP-IDF documents this as VSYNC recovery for RGB DMA desynchronization:
+# the exact horizontal image shifts observed on the hardware. It limits
+# persistent shift, but does not cure an underlying bandwidth shortage.
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
 CONFIG_CODEC_ES8311_SUPPORT=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

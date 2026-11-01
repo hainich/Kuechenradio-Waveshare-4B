@@ -28,6 +28,7 @@ jobs:
           grep -qx 'CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y' sdkconfig
           grep -qx 'CONFIG_SPIRAM_RODATA=y' sdkconfig
           grep -qx 'CONFIG_COMPILER_OPTIMIZATION_PERF=y' sdkconfig
+          grep -qx 'CONFIG_LCD_RGB_RESTART_IN_VSYNC=y' sdkconfig
       - name: Verify audio architecture before packaging
         run: |
           grep -q 'esp_wifi_set_ps(WIFI_PS_NONE)' main/radio_wifi.c
@@ -38,6 +39,9 @@ jobs:
           grep -q 'RD_AUDIO_FIFO_PSRAM' main/radio_stream.c
           grep -q 'xTaskCreatePinnedToCore(http_receiver_task' main/radio_stream.c
           grep -q 'esp_audio_simple_dec_process' main/radio_stream.c
+          grep -q 'esp_codec_dev_write(s_speaker, pcm' main/radio_stream.c
+          ! grep -q 'int16_t \*mono' main/radio_stream.c
+          grep -q 'radio_power_button_init' main/radio_ui.c
           grep -q 'esp_audio_dec_register_default' main/radio_stream.c
       - name: Build update and factory images
         run: |

@@ -281,18 +281,14 @@ static void play_stream(const char *url, uint32_t revision)
     }
     radio_diag_note(RD_STREAM_START, 0, 0);
 
-    /* ESP-IDF's malloc() prefers internal RAM for 16-KiB blocks with our
-     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384. Two scratch buffers consumed
-     * the internal heap needed by the HTTP receiver and audio FIFO.
-     * The scratch PCM/mono buffers are not DMA descriptors; the codec writer
-     * copies PCM to its own I2S driver buffers. Put them in external PSRAM. */
+    /* Keep one PCM workspace in PSRAM. The decoder returns interleaved
+     * stereo PCM here; downmix it IN PLACE before sending it to I2S. This
+     * eliminates the second 16-KiB PSRAM workspace and the memcpy of every
+     * decoded mono frame, both competing with RGB LCD DMA bandwidth. */
     uint8_t *encoded = malloc(AUDIO_READ_SIZE);
     uint8_t *pcm = heap_caps_malloc(AUDIO_PCM_CAPACITY,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    int16_t *mono = heap_caps_malloc(AUDIO_PCM_CAPACITY,
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint32_t pcm_capacity = AUDIO_PCM_CAPACITY;
-    uint32_t mono_capacity = AUDIO_PCM_CAPACITY;
     esp_audio_simple_dec_handle_t decoder = NULL;
     audio_pipe_t pipe = { .http = http, .revision = revision };
     uint8_t *fifo_storage = NULL;
@@ -306,9 +302,9 @@ static void play_stream(const char *url, uint32_t revision)
     atomic_init(&pipe.eof, false);
     pipe.mu = xSemaphoreCreateMutex();
     pipe.finished = xSemaphoreCreateBinary();
-    if (!encoded || !pcm || !mono || !pipe.mu || !pipe.finished) {
-        ESP_LOGE(TAG, "Audio-Workbuffers: encoded=%p PCM=%p mono=%p, PSRAM free=%u",
-                 (void *)encoded, (void *)pcm, (void *)mono,
+    if (!encoded || !pcm || !pipe.mu || !pipe.finished) {
+        ESP_LOGE(TAG, "Audio-Workbuffers: encoded=%p PCM=%p, PSRAM free=%u",
+                 (void *)encoded, (void *)pcm,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         status_set("Zu wenig RAM fuer Audio");
         goto done;
@@ -328,7 +324,7 @@ static void play_stream(const char *url, uint32_t revision)
     }
 
     /* Give the HTTP task and its stack first claim on scarce INTERNAL RAM.
-     * The PCM/mono workspaces above are now in PSRAM. The original code
+     * The PCM workspace above is in PSRAM. The original code
      * allocated both as malloc(16384), then rejected all FIFO choices if
      * largest_free_block < capacity + 8192; hardware fell back to direct
      * HTTP reads, leaving decoder and I2S starved for seconds.
@@ -404,7 +400,10 @@ static void play_stream(const char *url, uint32_t revision)
         }
     }
 
-    bool buffering = false;
+    /* Set "Spielt" only on the transition from buffering to audio output.
+     * Firmware #56 needlessly acquired a mutex for every decoded frame. */
+    bool buffering = true;
+    int64_t last_direct_payload_us = esp_timer_get_time();
     while (wanted(revision)) {
         int n;
         if (receiver_started) {
@@ -432,8 +431,25 @@ static void play_stream(const char *url, uint32_t revision)
                 continue;
             }
         } else {
+            /* The direct fallback must not treat EAGAIN or a momentary
+             * zero-byte read as an ended live stream. Measure this path too:
+             * previously the /diagnose report falsely showed HTTP=0 for it. */
+            int64_t direct_started = esp_timer_get_time();
             n = esp_http_client_read(http, (char *)encoded, AUDIO_READ_SIZE);
-            if (n <= 0) {
+            radio_diag_http_read(n,
+                (uint32_t)((esp_timer_get_time() - direct_started) / 1000));
+            if (n > 0) {
+                last_direct_payload_us = esp_timer_get_time();
+            } else if (n == 0 || n == -ESP_ERR_HTTP_EAGAIN) {
+                if (esp_timer_get_time() - last_direct_payload_us >= 12000000LL) {
+                    radio_diag_note(RD_HTTP_STALL, 12000, 0);
+                    ESP_LOGW(TAG, "Direct HTTP stream: no payload for 12s");
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            } else {
+                radio_diag_note(RD_HTTP_END, (uint32_t)(-n), n);
                 ESP_LOGW(TAG, "Direkter HTTP-Stream beendet: %d", n);
                 break;
             }
@@ -476,17 +492,6 @@ static void play_stream(const char *url, uint32_t revision)
                     goto done;
                 }
                 size_t samples = out.decoded_size / (info.channel * sizeof(int16_t));
-                if (samples * sizeof(int16_t) > mono_capacity) {
-                    uint32_t needed = (uint32_t)(samples * sizeof(int16_t));
-                    int16_t *bigger = heap_caps_realloc(mono, needed,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                    if (!bigger) {
-                        status_set("Zu wenig RAM fuer Audio");
-                        goto done;
-                    }
-                    mono = bigger;
-                    mono_capacity = needed;
-                }
                 if (!opened || active_rate != (int)info.sample_rate) {
                     if (opened) {
                         esp_codec_dev_close(s_speaker);
@@ -512,17 +517,17 @@ static void play_stream(const char *url, uint32_t revision)
                     esp_codec_dev_set_out_vol(s_speaker, settings.volume);
                     volume_applied = settings.volume;
                 }
-                const int16_t *stereo = (const int16_t *)pcm;
-                if (info.channel == 1) {
-                    memcpy(mono, pcm, samples * sizeof(int16_t));
-                } else {
+                /* In-place fold is safe: destination i always precedes both
+                 * source indices 2*i and 2*i+1. For mono, no copy is needed. */
+                if (info.channel == 2) {
+                    int16_t *frame = (int16_t *)pcm;
                     for (size_t i = 0; i < samples; ++i) {
-                        mono[i] = (int16_t)(((int32_t)stereo[i * 2] +
-                                            (int32_t)stereo[i * 2 + 1]) / 2);
+                        frame[i] = (int16_t)(((int32_t)frame[i * 2] +
+                                             (int32_t)frame[i * 2 + 1]) / 2);
                     }
                 }
                 int64_t codec_started = esp_timer_get_time();
-                int codec_result = esp_codec_dev_write(s_speaker, mono,
+                int codec_result = esp_codec_dev_write(s_speaker, pcm,
                                         (int)(samples * sizeof(int16_t)));
                 radio_diag_codec((uint32_t)((esp_timer_get_time() - codec_started) / 1000));
                 if (codec_result != ESP_CODEC_DEV_OK) {
@@ -530,9 +535,10 @@ static void play_stream(const char *url, uint32_t revision)
                     goto done;
                 }
                 radio_diag_audio_written();
-                if (buffering) status_set("Spielt");
-                buffering = false;
-                status_set("Spielt");
+                if (buffering) {
+                    status_set("Spielt");
+                    buffering = false;
+                }
             }
             if (raw.consumed > raw.len) {
                 ESP_LOGE(TAG, "Decoder invalid consumed size");
@@ -563,7 +569,6 @@ done:
     heap_caps_free(fifo_storage);
     free(encoded);
     heap_caps_free(pcm);
-    heap_caps_free(mono);
 }
 
 static void stream_task(void *arg)
