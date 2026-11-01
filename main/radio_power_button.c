@@ -13,6 +13,7 @@
 
 static const char *TAG = "power_button";
 static i2c_master_dev_handle_t s_dev;
+static bool s_ready;
 static const char *s_status = "nicht initialisiert";
 static uint32_t s_read_errors = 0;
 
@@ -62,13 +63,14 @@ void radio_power_button_init(void)
         ESP_LOGE(TAG, "PMU PKEY IRQ configuration: %s", esp_err_to_name(err));
         return;
     }
+    s_ready = true;
     s_status = "AXP2101 PWR kurz = Neustart (aktiv)";
     ESP_LOGI(TAG, "AXP2101 PKEY short-press IRQ enabled (I2C 0x34)");
 }
 
 void radio_power_button_poll(void)
 {
-    if (!s_dev || s_status[0] != 'A') return;
+    if (!s_ready || !s_dev) return;
     uint8_t flags = 0;
     esp_err_t err = pmu_read(AXP2101_IRQ_STATUS_PKEY, &flags);
     if (err != ESP_OK) {
