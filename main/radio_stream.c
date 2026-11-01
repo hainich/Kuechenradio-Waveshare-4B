@@ -1,8 +1,8 @@
 /*
  * Kuechenradio: internet streams decoded with Espressif esp_audio_codec,
  * output through the Waveshare ES8311 board support (ESP Codec Dev).
- * Network reception and audio decoding run on core 1 to avoid competing
- * with the RGB bounce-buffer ISR installed by app_main on core 0.
+ * HTTP reception and audio decoding run on core 0 as in firmware #49.
+ * Core-1 affinity in #51 made display and audio quality worse on hardware.
  */
 #include "radio_stream.h"
 #include "radio_config.h"
@@ -37,12 +37,11 @@
 #define AUDIO_PCM_MAX_CAPACITY 65536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
 #define AUDIO_NETWORK_PACKET 1024
-/* Keep continuously running network/codec work away from the LCD interrupt
- * created on core 0; give the HTTP producer headroom over the decoder.
- * LVGL retains its original unpinned affinity (-1) from firmware #36. */
-#define RADIO_AUDIO_CORE 1
-#define RADIO_AUDIO_PRIORITY 6
-#define RADIO_HTTP_PRIORITY 8
+/* Restore the CPU assignment of the better-performing firmware #49;
+ * LVGL remains unpinned as before. */
+#define RADIO_AUDIO_CORE 0
+#define RADIO_AUDIO_PRIORITY 4
+#define RADIO_HTTP_PRIORITY 5
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -344,7 +343,8 @@ static void play_stream(const char *url, uint32_t revision)
         }
     }
 
-    bool buffering = false;
+    /* Startup is buffering until the first decoded PCM output. */
+    bool buffering = true;
     while (wanted(revision)) {
         /* Diagnostic is intentionally low rate, with no logging in the
          * latency-sensitive LCD interrupt or per received packet. */
@@ -485,9 +485,12 @@ static void play_stream(const char *url, uint32_t revision)
                     status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
-                if (buffering) status_set("Spielt");
-                buffering = false;
-                status_set("Spielt");
+                /* Avoid taking the status mutex and formatting text on
+                 * every decoded audio block. UI state changes only here. */
+                if (buffering) {
+                    status_set("Spielt");
+                    buffering = false;
+                }
             }
             if (raw.consumed > raw.len) {
                 ESP_LOGE(TAG, "Decoder invalid consumed size");
@@ -547,8 +550,20 @@ static void stream_task(void *arg)
         }
         uint32_t revision = radio_config_revision();
         status_set("Verbinde mit Sender ...");
+        TickType_t session_started = xTaskGetTickCount();
         play_stream(cfg.stations[cfg.station].url, revision);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        /* A fixed 1500 ms pause after *every* stream exit caused audible
+         * reconnection gaps even for a healthy long-running station.
+         * Preserve the slow retry for immediately failing streams, and
+         * react promptly to user-initiated station changes. */
+        TickType_t session_ticks = xTaskGetTickCount() - session_started;
+        if (radio_config_revision() != revision) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        } else if (session_ticks >= pdMS_TO_TICKS(5000)) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1500));
+        }
     }
 }
 
@@ -564,8 +579,7 @@ void radio_stream_start(void)
         status_set("ES8311 nicht gefunden");
         return;
     }
-    /* Recovery experiment: place HTTP/decoder on core 1; LVGL remains
-     * unpinned so the other core can run touch and UI work when available. */
+    /* Back to the #49 core layout after the #51 hardware regression. */
     BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "radio_audio", 24576,
                                             NULL, RADIO_AUDIO_PRIORITY, NULL, RADIO_AUDIO_CORE);
     ESP_LOGI(TAG, "Audiotask: core %d priority %d; HTTP: core %d priority %d",

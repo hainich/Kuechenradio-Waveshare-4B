@@ -4,12 +4,16 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 
 static radio_settings_t s_cfg;
 static SemaphoreHandle_t s_mu;
+static SemaphoreHandle_t s_flash_mu;
+static TaskHandle_t s_ui_persist_task;
+static void ui_persist_task(void *arg);
 static uint32_t s_revision = 1;
 static const char *TAG = "radio_cfg";
 
@@ -25,7 +29,13 @@ static const radio_preset_t defaults[RADIO_PRESETS] = {
 void radio_config_init(void)
 {
     s_mu = xSemaphoreCreateMutex();
-    if (!s_mu) abort();
+    s_flash_mu = xSemaphoreCreateMutex();
+    if (!s_mu || !s_flash_mu) abort();
+    /* The UI must never perform synchronous NVS flash writes. A separate
+     * task coalesces station/play/volume changes; the web setup keeps its
+     * synchronous full save because it reboots shortly afterwards. */
+    if (xTaskCreate(ui_persist_task, "radio_nvs", 4096, NULL, 2,
+                    &s_ui_persist_task) != pdPASS) abort();
     memset(&s_cfg, 0, sizeof(s_cfg));
     memcpy(s_cfg.stations, defaults, sizeof(defaults));
     s_cfg.volume = 45;
@@ -81,9 +91,47 @@ static void persist(const radio_settings_t *cfg)
     nvs_close(h);
 }
 
+/* Only persist UI-controlled values. Flash writes can suspend external-memory
+ * cache access and disturb RGB DMA; never execute them in an LVGL callback. */
+static void persist_ui(uint8_t station, uint8_t volume, bool playing)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("kitchenradio", NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS UI open: %s", esp_err_to_name(err));
+        return;
+    }
+    err = nvs_set_u8(h, "station", station);
+    if (err == ESP_OK) err = nvs_set_u8(h, "volume", volume);
+    if (err == ESP_OK) err = nvs_set_u8(h, "playing", playing ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(h);
+    if (err != ESP_OK) ESP_LOGE(TAG, "NVS UI save: %s", esp_err_to_name(err));
+    nvs_close(h);
+}
+
+static void ui_persist_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* One flash commit after a short period without UI changes. */
+        while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1500)) != 0) { }
+        xSemaphoreTake(s_flash_mu, portMAX_DELAY);
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        uint8_t station = s_cfg.station;
+        uint8_t volume = s_cfg.volume;
+        bool playing = s_cfg.playing;
+        xSemaphoreGive(s_mu);
+        persist_ui(station, volume, playing);
+        xSemaphoreGive(s_flash_mu);
+    }
+}
+
 void radio_config_save(const radio_settings_t *cfg)
 {
     if (cfg->station >= RADIO_PRESETS || cfg->volume > 100) return;
+    /* Serialize full web configuration with the delayed UI-only writer. */
+    xSemaphoreTake(s_flash_mu, portMAX_DELAY);
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_cfg = *cfg;
     s_cfg.ssid[RADIO_SSID_MAX - 1] = 0;
@@ -97,31 +145,40 @@ void radio_config_save(const radio_settings_t *cfg)
        cannot overwrite a more recent station or volume selection. */
     persist(&s_cfg);
     xSemaphoreGive(s_mu);
+    xSemaphoreGive(s_flash_mu);
 }
 void radio_config_select(int index)
 {
     if (index < 0 || index >= RADIO_PRESETS) return;
-    radio_settings_t cfg;
-    radio_config_get(&cfg);
-    cfg.station = index;
-    cfg.playing = true;
-    radio_config_save(&cfg);
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    bool changed = s_cfg.station != index || !s_cfg.playing;
+    if (changed) {
+        s_cfg.station = (uint8_t)index;
+        s_cfg.playing = true;
+        ++s_revision;
+    }
+    xSemaphoreGive(s_mu);
+    if (changed) xTaskNotifyGive(s_ui_persist_task);
 }
 void radio_config_volume(int volume, bool persist_now)
 {
     if (volume < 0) volume = 0;
     if (volume > 100) volume = 100;
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    s_cfg.volume = volume;
-    if (persist_now) persist(&s_cfg);
+    s_cfg.volume = (uint8_t)volume;
     xSemaphoreGive(s_mu);
+    if (persist_now) xTaskNotifyGive(s_ui_persist_task);
 }
 void radio_config_play(bool playing)
 {
-    radio_settings_t cfg;
-    radio_config_get(&cfg);
-    cfg.playing = playing;
-    radio_config_save(&cfg);
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    bool changed = s_cfg.playing != playing;
+    if (changed) {
+        s_cfg.playing = playing;
+        ++s_revision;
+    }
+    xSemaphoreGive(s_mu);
+    if (changed) xTaskNotifyGive(s_ui_persist_task);
 }
 uint32_t radio_config_revision(void)
 {
