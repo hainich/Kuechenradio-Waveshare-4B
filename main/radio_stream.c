@@ -7,6 +7,7 @@
 #include "radio_stream.h"
 #include "radio_config.h"
 #include "radio_wifi.h"
+#include "radio_engine_policy.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -34,14 +35,14 @@
 #define AUDIO_READ_SIZE 1536
 #define AUDIO_PCM_CAPACITY 16384
 #define AUDIO_PCM_MAX_CAPACITY 65536
-#define AUDIO_HTTP_TIMEOUT_MS 4500
-#define AUDIO_NETWORK_PACKET 1024
+#define AUDIO_HTTP_TIMEOUT_MS RADIO_ENGINE_HTTP_TIMEOUT_MS
+#define AUDIO_NETWORK_PACKET RADIO_ENGINE_HTTP_READ_BYTES
 /* Core 1 is reserved for responsive LVGL touch/display work. On core 0 the
  * HTTP producer runs ahead of the audio consumer when data is available;
  * both stay below ESP-IDF's high-priority Wi-Fi/TCP/IP system tasks. */
-#define RADIO_AUDIO_CORE 0
-#define RADIO_AUDIO_PRIORITY 4
-#define RADIO_HTTP_PRIORITY 5
+#define RADIO_AUDIO_CORE RADIO_ENGINE_CORE_AUDIO
+#define RADIO_AUDIO_PRIORITY RADIO_ENGINE_PRIORITY_AUDIO
+#define RADIO_HTTP_PRIORITY RADIO_ENGINE_PRIORITY_NETWORK
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -318,9 +319,9 @@ static void play_stream(const char *url, uint32_t revision)
         ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
-    size_t refill = receiver_started ? pipe.ring.capacity / 2 : 0;
+    size_t refill = receiver_started ? radio_engine_resume_threshold(pipe.ring.capacity) : 0;
     if (receiver_started) {
-        size_t start_fill = pipe.ring.capacity * 3 / 4;
+        size_t start_fill = radio_engine_start_threshold(pipe.ring.capacity);
         status_set("Puffert Audiostream ...");
         while (wanted(revision) && !atomic_load(&pipe.eof) &&
                pipe_used(&pipe) < start_fill) {
@@ -332,8 +333,8 @@ static void play_stream(const char *url, uint32_t revision)
     while (wanted(revision)) {
         int n;
         if (receiver_started) {
-            if (pipe_used(&pipe) == 0) {
-                if (atomic_load(&pipe.eof)) break;
+            if (pipe_used(&pipe) < radio_engine_low_watermark(pipe.ring.capacity) && !atomic_load(&pipe.eof)) {
+                /* Refill before complete starvation; avoid repeated audible gaps. */
                 if (!buffering) {
                     ++underruns;
                     buffering = true;
