@@ -1,5 +1,6 @@
 #include "radio_diag.h"
 #include "esp_timer.h"
+#include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include <limits.h>
@@ -11,6 +12,7 @@ static portMUX_TYPE s_diag_lock = portMUX_INITIALIZER_UNLOCKED;
 static radio_diag_snapshot_t s_diag;
 static uint32_t s_next_event;
 static uint32_t s_num_events;
+static uint32_t s_last_http_no_data_event_ms;
 static uint32_t ms_now(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint32_t age(uint32_t now, uint32_t then) {
     return then ? now - then : UINT32_MAX;
@@ -20,6 +22,18 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
 {
     uint32_t now = ms_now();
     taskENTER_CRITICAL(&s_diag_lock);
+    /* Count every empty/error read, but cap their event rate. Otherwise
+     * a stalled server returning zero rapidly would overwrite all history. */
+    if (kind == RD_HTTP_EMPTY || kind == RD_HTTP_ERROR) {
+        if (kind == RD_HTTP_EMPTY) ++s_diag.http_no_payload;
+        else ++s_diag.http_errors;
+        if (s_last_http_no_data_event_ms != 0 &&
+            now - s_last_http_no_data_event_ms < 1500) {
+            taskEXIT_CRITICAL(&s_diag_lock);
+            return;
+        }
+        s_last_http_no_data_event_ms = now;
+    }
     radio_diag_event_t *ev = &s_diag.events[s_next_event];
     ev->ms = now;
     ev->value = value;
@@ -34,8 +48,6 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
 
     switch (kind) {
     case RD_HTTP_READ_SLOW: ++s_diag.http_slow; break;
-    case RD_HTTP_EMPTY: ++s_diag.http_no_payload; break;
-    case RD_HTTP_ERROR: ++s_diag.http_errors; break;
     case RD_FIFO_UNDERRUN: ++s_diag.fifo_underruns; break;
     case RD_AUDIO_GAP: ++s_diag.audio_gaps; break;
     case RD_DECODER_SLOW: ++s_diag.decoder_slow; break;
@@ -62,8 +74,10 @@ void radio_diag_http_read(int result, uint32_t duration_ms)
     }
     taskEXIT_CRITICAL(&s_diag_lock);
     if (duration_ms >= 350) radio_diag_note(RD_HTTP_READ_SLOW, duration_ms, result > 0 ? 1 : 0);
-    if (result == 0) radio_diag_note(RD_HTTP_EMPTY, duration_ms, 0);
-    if (result < 0) radio_diag_note(RD_HTTP_ERROR, duration_ms, result);
+    if (result == 0 || result == -ESP_ERR_HTTP_EAGAIN)
+        radio_diag_note(RD_HTTP_EMPTY, duration_ms, result);
+    else if (result < 0)
+        radio_diag_note(RD_HTTP_ERROR, duration_ms, result);
 }
 
 void radio_diag_decode(uint32_t duration_ms)
