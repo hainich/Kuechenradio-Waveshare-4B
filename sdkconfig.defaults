@@ -2,6 +2,11 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
+# IDF otherwise defaults to 40 MHz even for Octal PSRAM. The framebuffer,
+# bounce-buffer copies and PSRAM XIP share this bus; use the board's 80 MHz mode.
+CONFIG_SPIRAM_SPEED_80M=y
+# Bounce-buffer EOF copies and audio decoding need CPU headroom (IDF defaults to 160).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
@@ -19,8 +24,9 @@ CONFIG_BSP_LCD_RGB_BUFFER_NUMS=1
 CONFIG_BSP_LCD_RGB_BOUNCE_BUFFER_HEIGHT=20
 # Espressif recommends 64-byte cache lines for RGB PSRAM bounce-buffer copies.
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
-# Recover from RGB DMA/VSYNC loss rather than leaving the picture shifted.
-CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
+# IDF 5.5.5 already restarts an incomplete bounce frame at VSYNC. Do not force
+# a DMA reset every frame: the driver warns a late reset can itself shift a frame.
+# CONFIG_LCD_RGB_RESTART_IN_VSYNC is not set
 # CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR is not set
 # CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE is not set
 # Espressif's documented mitigations for RGB DMA starvation and screen drift.

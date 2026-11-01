@@ -28,6 +28,9 @@ jobs:
           grep -qx 'CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y' sdkconfig
           grep -qx 'CONFIG_SPIRAM_RODATA=y' sdkconfig
           grep -qx 'CONFIG_COMPILER_OPTIMIZATION_PERF=y' sdkconfig
+          grep -qx 'CONFIG_SPIRAM_SPEED=80' sdkconfig
+          grep -qx 'CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240' sdkconfig
+          grep -qx '# CONFIG_LCD_RGB_RESTART_IN_VSYNC is not set' sdkconfig
       - name: Verify audio architecture before packaging
         run: |
           grep -q 'esp_wifi_set_ps(WIFI_PS_NONE)' main/radio_wifi.c

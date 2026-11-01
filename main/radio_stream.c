@@ -1,8 +1,8 @@
 /*
  * Kuechenradio: internet streams decoded with Espressif esp_audio_codec,
  * output through the Waveshare ES8311 board support (ESP Codec Dev).
- * The entire audio pipeline is pinned to core 0, leaving core 1 available
- * for the RGB display and touch/LVGL handling.
+ * The audio tasks retain the core-0 placement of the recovery firmware;
+ * LVGL remains free to run on either core.
  */
 #include "radio_stream.h"
 #include "radio_config.h"
@@ -37,8 +37,7 @@
 #define AUDIO_PCM_MAX_CAPACITY 65536
 #define AUDIO_HTTP_TIMEOUT_MS 4500
 #define AUDIO_NETWORK_PACKET 1024
-/* Core 1 is reserved for responsive LVGL touch/display work. On core 0 the
- * HTTP producer runs ahead of the audio consumer when data is available;
+/* On core 0 the HTTP producer runs ahead of the audio consumer when data is available;
  * both stay below ESP-IDF's high-priority Wi-Fi/TCP/IP system tasks. */
 #define RADIO_AUDIO_CORE 0
 #define RADIO_AUDIO_PRIORITY 4
@@ -136,7 +135,14 @@ static esp_http_client_handle_t open_stream(const char *url, esp_audio_simple_de
             esp_http_client_cleanup(client);
             return NULL;
         }
-        esp_http_client_fetch_headers(client);
+        int64_t content_length = esp_http_client_fetch_headers(client);
+        if (content_length < 0) {
+            /* A status line (including 200) can arrive before a header timeout.
+             * Do not hand an incompletely initialized response to the reader. */
+            ESP_LOGW(TAG, "HTTP headers incomplete: %lld", (long long)content_length);
+            esp_http_client_cleanup(client);
+            return NULL;
+        }
         int status = esp_http_client_get_status_code(client);
         ESP_LOGI(TAG, "HTTP %d %s", status, target);
         if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && headers.redirect[0]) {
@@ -170,9 +176,9 @@ static bool wanted(uint32_t revision)
 
 /*
  * HTTP reception must continue while MP3 decoding or the ES8311/I2S writer
- * blocks. The old 64-KiB PSRAM FIFO increased contention with RGB DMA.
- * This implementation keeps a modest FIFO exclusively in internal SRAM,
- * leaving the proven single RGB framebuffer configuration untouched.
+ * blocks. Keep the compressed FIFO in internal SRAM so its copies do not
+ * share the RGB framebuffer's PSRAM bus. This does not by itself prove
+ * that PSRAM contention caused the reported hardware dropouts.
  *
  * The audio_ring_t itself is not synchronized; its two users take mu for
  * short copies and index updates. HTTP and codec calls never hold mu.
@@ -185,6 +191,11 @@ typedef struct {
     uint32_t revision;
     atomic_bool stop;
     atomic_bool eof;
+    /* Accessed under mu; capture delays that a 30-second instantaneous FIFO
+     * sample would miss. Do not log in the receiving hot path. */
+    uint32_t read_max_ms;
+    unsigned read_timeouts;
+    size_t low_water;
 } audio_pipe_t;
 
 static size_t pipe_used(audio_pipe_t *pipe)
@@ -207,14 +218,19 @@ static size_t pipe_read(audio_pipe_t *pipe, uint8_t *dst, size_t count)
 {
     xSemaphoreTake(pipe->mu, portMAX_DELAY);
     size_t n = audio_ring_read(&pipe->ring, dst, count);
+    size_t remaining = audio_ring_available(&pipe->ring);
+    if (remaining < pipe->low_water) pipe->low_water = remaining;
     xSemaphoreGive(pipe->mu);
     return n;
 }
 
-static size_t pipe_write(audio_pipe_t *pipe, const uint8_t *src, size_t count)
+static size_t pipe_receive(audio_pipe_t *pipe, const uint8_t *src, int count,
+                           uint32_t read_ms)
 {
     xSemaphoreTake(pipe->mu, portMAX_DELAY);
-    size_t n = audio_ring_write(&pipe->ring, src, count);
+    if (read_ms > pipe->read_max_ms) pipe->read_max_ms = read_ms;
+    if (count == -ESP_ERR_HTTP_EAGAIN) ++pipe->read_timeouts;
+    size_t n = count > 0 ? audio_ring_write(&pipe->ring, src, (size_t)count) : 0;
     xSemaphoreGive(pipe->mu);
     return n;
 }
@@ -223,19 +239,22 @@ static void http_receiver_task(void *arg)
 {
     audio_pipe_t *pipe = (audio_pipe_t *)arg;
     uint8_t packet[AUDIO_NETWORK_PACKET];
-    unsigned read_timeouts = 0;
     TickType_t last_payload = xTaskGetTickCount();
     while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
+            /* Backpressure from a full FIFO is not a network outage. */
+            last_payload = xTaskGetTickCount();
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        int64_t read_start = esp_timer_get_time();
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
+        uint32_t read_ms = (uint32_t)((esp_timer_get_time() - read_start) / 1000);
+        size_t written = pipe_receive(pipe, packet, n, read_ms);
         if (n > 0) {
-            read_timeouts = 0;
             last_payload = xTaskGetTickCount();
             /* Only the consumer can change free space, and it increases it. */
-            if (pipe_write(pipe, packet, (size_t)n) != (size_t)n) {
+            if (written != (size_t)n) {
                 ESP_LOGE(TAG, "Audio FIFO overflow");
                 break;
             }
@@ -243,9 +262,6 @@ static void http_receiver_task(void *arg)
                    !esp_http_client_is_complete_data_received(pipe->http) &&
                    (xTaskGetTickCount() - last_payload) < pdMS_TO_TICKS(12000)) {
             /* A short zero-byte read or ESP-IDF EAGAIN is not EOF for a live stream. */
-            if (++read_timeouts % 5 == 0) {
-                ESP_LOGW(TAG, "HTTP no payload for %u reads", read_timeouts);
-            }
             vTaskDelay(pdMS_TO_TICKS(10));
         } else {
             ESP_LOGW(TAG, "HTTP stream ended: %d", n);
@@ -280,6 +296,11 @@ static void play_stream(const char *url, uint32_t revision)
     int volume_applied = -1;
     unsigned underruns = 0;
     unsigned slow_writes = 0;
+    uint32_t decode_max_us = 0;
+    uint32_t write_max_ms = 0;
+    uint32_t service_gap_max_ms = 0;
+    int64_t last_write_end_us = 0;
+    TickType_t direct_last_payload = xTaskGetTickCount();
     TickType_t last_audio_report = xTaskGetTickCount();
 
     atomic_init(&pipe.stop, false);
@@ -304,8 +325,7 @@ static void play_stream(const char *url, uint32_t revision)
         goto done;
     }
 
-    /* Keep the network producer independent of I2S and decoding. Internal SRAM
-       avoids the PSRAM contention observed with the previous large audio FIFO. */
+    /* Keep the network producer independent of I2S and decoding. */
     const size_t fifo_sizes[] = {32768, 24576, 16384, 12288, 8192};
     for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
         size_t capacity = fifo_sizes[i];
@@ -314,6 +334,7 @@ static void play_stream(const char *url, uint32_t revision)
         fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!fifo_storage) continue;
         audio_ring_init(&pipe.ring, fifo_storage, capacity);
+        pipe.low_water = capacity;
         if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
                                     &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
@@ -367,10 +388,17 @@ static void play_stream(const char *url, uint32_t revision)
             }
         } else {
             n = esp_http_client_read(http, (char *)encoded, AUDIO_READ_SIZE);
+            if ((n == 0 || n == -ESP_ERR_HTTP_EAGAIN) &&
+                !esp_http_client_is_complete_data_received(http) &&
+                xTaskGetTickCount() - direct_last_payload < pdMS_TO_TICKS(12000)) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
             if (n <= 0) {
                 ESP_LOGW(TAG, "Direkter HTTP-Stream beendet: %d", n);
                 break;
             }
+            direct_last_payload = xTaskGetTickCount();
         }
 
         esp_audio_simple_dec_raw_t raw = { .buffer = encoded, .len = (uint32_t)n };
@@ -378,7 +406,11 @@ static void play_stream(const char *url, uint32_t revision)
             esp_audio_simple_dec_out_t out = {
                 .buffer = pcm, .len = pcm_capacity
             };
+            raw.consumed = 0;
+            int64_t decode_start_us = esp_timer_get_time();
             esp_audio_err_t err = esp_audio_simple_dec_process(decoder, &raw, &out);
+            uint32_t decode_us = (uint32_t)(esp_timer_get_time() - decode_start_us);
+            if (decode_us > decode_max_us) decode_max_us = decode_us;
             if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
                 out.needed_size > pcm_capacity &&
                 out.needed_size <= AUDIO_PCM_MAX_CAPACITY) {
@@ -395,6 +427,10 @@ static void play_stream(const char *url, uint32_t revision)
                 ESP_LOGE(TAG, "Audio decoder error %d (%s)", err,
                          esp_audio_simple_dec_get_name(type));
                 status_set("Stream-Dekodierung fehlgeschlagen");
+                goto done;
+            }
+            if (raw.consumed > raw.len || out.decoded_size > pcm_capacity) {
+                ESP_LOGE(TAG, "Decoder invalid input/output size");
                 goto done;
             }
             if (out.decoded_size) {
@@ -435,6 +471,9 @@ static void play_stream(const char *url, uint32_t revision)
                     opened = true;
                     active_rate = (int)info.sample_rate;
                     volume_applied = -1;
+                    last_write_end_us = 0;
+                    ESP_LOGI(TAG, "PCM: %u Hz, 16-bit mono; source channels=%u, bitrate=%u",
+                             info.sample_rate, info.channel, info.bitrate);
                 }
                 radio_settings_t settings;
                 radio_config_get(&settings);
@@ -452,15 +491,20 @@ static void play_stream(const char *url, uint32_t revision)
                     }
                 }
                 int64_t write_start_us = esp_timer_get_time();
+                if (last_write_end_us) {
+                    uint32_t gap_ms = (uint32_t)((write_start_us - last_write_end_us) / 1000);
+                    if (gap_ms > service_gap_max_ms) service_gap_max_ms = gap_ms;
+                }
                 int write_result = esp_codec_dev_write(s_speaker, mono,
                                        (int)(samples * sizeof(int16_t)));
-                int64_t write_ms = (esp_timer_get_time() - write_start_us) / 1000;
-                if (write_ms > 150) {
+                last_write_end_us = esp_timer_get_time();
+                uint32_t write_ms = (uint32_t)((last_write_end_us - write_start_us) / 1000);
+                if (write_ms > write_max_ms) write_max_ms = write_ms;
+                /* Blocking for the submitted PCM duration is normal. Count only
+                 * excess waiting; a fixed 150 ms limit hides short deadline misses. */
+                uint32_t pcm_ms = (uint32_t)((samples * 1000 + info.sample_rate - 1) / info.sample_rate);
+                if (write_ms > pcm_ms + 20) {
                     ++slow_writes;
-                    if (slow_writes <= 3 || slow_writes % 20 == 0) {
-                        ESP_LOGW(TAG, "Slow codec/I2S write: %lld ms (%u total)",
-                                 (long long)write_ms, slow_writes);
-                    }
                 }
                 if (write_result != ESP_CODEC_DEV_OK) {
                     status_set("Audioausgabe fehlgeschlagen");
@@ -473,20 +517,35 @@ static void play_stream(const char *url, uint32_t revision)
                 TickType_t now = xTaskGetTickCount();
                 if (now - last_audio_report >= pdMS_TO_TICKS(30000)) {
                     last_audio_report = now;
-                    size_t fifo_bytes = receiver_started ? pipe_used(&pipe) : 0;
+                    size_t fifo_bytes = 0, low_water = 0;
+                    uint32_t read_max_ms = 0;
+                    unsigned read_timeouts = 0;
+                    if (receiver_started) {
+                        xSemaphoreTake(pipe.mu, portMAX_DELAY);
+                        fifo_bytes = audio_ring_available(&pipe.ring);
+                        low_water = pipe.low_water;
+                        read_max_ms = pipe.read_max_ms;
+                        read_timeouts = pipe.read_timeouts;
+                        pipe.low_water = fifo_bytes;
+                        pipe.read_max_ms = 0;
+                        pipe.read_timeouts = 0;
+                        xSemaphoreGive(pipe.mu);
+                    }
                     size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-                    ESP_LOGI(TAG, "Audio health: FIFO=%u/%u; underruns=%u; slow I2S=%u; internal largest=%u",
+                    ESP_LOGI(TAG, "Audio 30s: FIFO=%u/%u min=%u; underruns=%u; HTTP max=%u ms timeouts=%u",
                              (unsigned)fifo_bytes,
                              (unsigned)(receiver_started ? pipe.ring.capacity : 0),
-                             underruns, slow_writes, (unsigned)largest);
+                             (unsigned)low_water, underruns, (unsigned)read_max_ms, read_timeouts);
+                    ESP_LOGI(TAG, "Audio 30s: decode max=%u us; I2S max=%u ms slow=%u; service gap max=%u ms; internal largest=%u",
+                             (unsigned)decode_max_us, (unsigned)write_max_ms, slow_writes,
+                             (unsigned)service_gap_max_ms, (unsigned)largest);
+                    decode_max_us = write_max_ms = service_gap_max_ms = 0;
                 }
             }
-            if (raw.consumed > raw.len) {
-                ESP_LOGE(TAG, "Decoder invalid consumed size");
-                goto done;
-            }
-            if (raw.consumed == 0) {
-                ESP_LOGE(TAG, "Decoder made no input progress");
+            /* The parser can emit cached PCM without consuming new input.
+             * Output is progress too; keep the same input until it is consumed. */
+            if (raw.consumed == 0 && out.decoded_size == 0) {
+                ESP_LOGE(TAG, "Decoder made no input or output progress");
                 status_set("Decoder blockiert");
                 goto done;
             }
