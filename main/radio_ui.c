@@ -9,6 +9,7 @@
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static lv_obj_t *s_btn[RADIO_PRESETS];
 static lv_obj_t *s_label[RADIO_PRESETS];
@@ -21,17 +22,31 @@ static lv_obj_t *s_play_label;
 static int s_selected = -1;
 static bool s_playing = true;
 static uint32_t s_last_rev;
+static int s_last_slider_value = -1;
+static int64_t s_last_slider_update_us = 0;
 
 static void preset_click(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
-    radio_config_select(index);
+    if (index != s_selected) radio_config_select(index);
 }
 static void slider_event(lv_event_t *event)
 {
     lv_event_code_t type = lv_event_get_code(event);
     int value = lv_slider_get_value(s_slider);
-    radio_config_volume(value, type == LV_EVENT_RELEASED);
+    /* Coalesce touch-move bursts: do not take the configuration mutex on
+     * every GT911 sample. Always apply and persist the final release. */
+    if (type == LV_EVENT_RELEASED) {
+        radio_config_volume(value, true);
+        s_last_slider_value = value;
+        return;
+    }
+    if (value == s_last_slider_value) return;
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_slider_update_us < 50000) return;
+    s_last_slider_update_us = now;
+    s_last_slider_value = value;
+    radio_config_volume(value, false);
 }
 static void play_event(lv_event_t *event)
 {
