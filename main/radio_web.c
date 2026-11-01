@@ -2,6 +2,7 @@
 #include "radio_config.h"
 #include "radio_wifi.h"
 #include "radio_diag.h"
+#include "radio_power_button.h"
 #include "esp_heap_caps.h"
 #include "url_codec.h"
 #include <stdio.h>
@@ -170,6 +171,7 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     used += (size_t)n; \
 } while (0)
     REPORT("KUECHENRADIO DIAGNOSE / SRAM-FIFO-Korrektur auf Basis #49\n");
+    REPORT("Physische PWR-Taste: %s\n", radio_power_button_status());
     REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\n",
            (unsigned long)(d.uptime_ms / 1000), (int)esp_reset_reason(),
            radio_wifi_connected() ? "ja" : "nein");

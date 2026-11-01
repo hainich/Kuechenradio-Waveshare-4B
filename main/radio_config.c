@@ -103,6 +103,9 @@ void radio_config_select(int index)
     if (index < 0 || index >= RADIO_PRESETS) return;
     radio_settings_t cfg;
     radio_config_get(&cfg);
+    /* Repeated taps on the already-playing station must not commit flash,
+     * increment revision or interrupt an otherwise healthy stream. */
+    if (cfg.station == index && cfg.playing) return;
     cfg.station = index;
     cfg.playing = true;
     radio_config_save(&cfg);
@@ -120,6 +123,7 @@ void radio_config_play(bool playing)
 {
     radio_settings_t cfg;
     radio_config_get(&cfg);
+    if (cfg.playing == playing) return;
     cfg.playing = playing;
     radio_config_save(&cfg);
 }
