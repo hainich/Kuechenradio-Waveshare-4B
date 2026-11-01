@@ -38,7 +38,7 @@ jobs:
           grep -q 'RD_AUDIO_FIFO_INTERNAL' main/radio_stream.c
           grep -q 'RD_AUDIO_FIFO_PSRAM' main/radio_stream.c
           grep -q 'xTaskCreatePinnedToCore(http_receiver_task' main/radio_stream.c
-          grep -q 'ulTaskNotifyTake(pdTRUE, portMAX_DELAY)' main/radio_stream.c
+          ! grep -q 'ulTaskNotifyTake(pdTRUE, portMAX_DELAY)' main/radio_stream.c
           grep -q 'AXP2101_PKEY_SHORT_BIT' main/radio_power_button.c
           grep -q 'esp_audio_simple_dec_process' main/radio_stream.c
           grep -q 'esp_audio_dec_register_default' main/radio_stream.c
