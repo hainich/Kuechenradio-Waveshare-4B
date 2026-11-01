@@ -6,8 +6,8 @@
 #include <stdint.h>
 #define RADIO_ENGINE_CORE_AUDIO 0
 #define RADIO_ENGINE_CORE_NETWORK 0
-#define RADIO_ENGINE_PRIORITY_AUDIO 5
-#define RADIO_ENGINE_PRIORITY_NETWORK 4
+#define RADIO_ENGINE_PRIORITY_AUDIO 4
+#define RADIO_ENGINE_PRIORITY_NETWORK 5
 #define RADIO_ENGINE_HTTP_READ_BYTES 1024
 #define RADIO_ENGINE_HTTP_TIMEOUT_MS 4500
 static inline size_t radio_engine_start_threshold(size_t capacity) {
