@@ -23,6 +23,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "radio_diag.h"
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "esp_codec_dev.h"
 
@@ -207,6 +208,8 @@ static size_t pipe_read(audio_pipe_t *pipe, uint8_t *dst, size_t count)
 {
     xSemaphoreTake(pipe->mu, portMAX_DELAY);
     size_t n = audio_ring_read(&pipe->ring, dst, count);
+    radio_diag_fifo((uint32_t)audio_ring_available(&pipe->ring),
+                    (uint32_t)pipe->ring.capacity);
     xSemaphoreGive(pipe->mu);
     return n;
 }
@@ -215,6 +218,8 @@ static size_t pipe_write(audio_pipe_t *pipe, const uint8_t *src, size_t count)
 {
     xSemaphoreTake(pipe->mu, portMAX_DELAY);
     size_t n = audio_ring_write(&pipe->ring, src, count);
+    radio_diag_fifo((uint32_t)audio_ring_available(&pipe->ring),
+                    (uint32_t)pipe->ring.capacity);
     xSemaphoreGive(pipe->mu);
     return n;
 }
@@ -230,7 +235,9 @@ static void http_receiver_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        int64_t read_started = esp_timer_get_time();
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
+        radio_diag_http_read(n, (uint32_t)((esp_timer_get_time() - read_started) / 1000));
         if (n > 0) {
             last_payload_us = esp_timer_get_time();
             /* Only the consumer can change free space, and it increases it. */
@@ -243,6 +250,7 @@ static void http_receiver_task(void *arg)
              * a few consecutive zero/EAGAIN reads as a finished stream. */
             int64_t now_us = esp_timer_get_time();
             if (now_us - last_payload_us >= 12000000LL) {
+                radio_diag_note(RD_HTTP_STALL, 12000, 0);
                 ESP_LOGW(TAG, "HTTP stream stalled for 12 s; reconnecting");
                 break;
             }
@@ -252,6 +260,7 @@ static void http_receiver_task(void *arg)
             }
             vTaskDelay(pdMS_TO_TICKS(10));
         } else {
+            radio_diag_note(RD_HTTP_END, (uint32_t)(-n), n);
             ESP_LOGW(TAG, "HTTP stream ended: %d", n);
             break;
         }
@@ -266,9 +275,11 @@ static void play_stream(const char *url, uint32_t revision)
     esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
     esp_http_client_handle_t http = open_stream(url, &type);
     if (!http) {
+        radio_diag_note(RD_STREAM_OPEN_FAILED, 0, 0);
         status_set("Stream nicht erreichbar");
         return;
     }
+    radio_diag_note(RD_STREAM_START, 0, 0);
 
     uint8_t *encoded = malloc(AUDIO_READ_SIZE);
     uint8_t *pcm = malloc(AUDIO_PCM_CAPACITY);
@@ -319,6 +330,7 @@ static void play_stream(const char *url, uint32_t revision)
         if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
                                     &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
+            radio_diag_fifo(0, (uint32_t)capacity);
             ESP_LOGI(TAG, "HTTP/I2S getrennt; interner Audiopuffer: %u Bytes",
                      (unsigned)capacity);
             break;
@@ -327,6 +339,7 @@ static void play_stream(const char *url, uint32_t revision)
         fifo_storage = NULL;
     }
     if (!receiver_started) {
+        radio_diag_note(RD_AUDIO_DIRECT, 0, 0);
         ESP_LOGW(TAG, "Interner RAM knapp: direkter Audiopfad");
     }
 
@@ -350,6 +363,7 @@ static void play_stream(const char *url, uint32_t revision)
                 if (atomic_load(&pipe.eof)) break;
                 if (!buffering) {
                     ++underruns;
+                    radio_diag_note(RD_FIFO_UNDERRUN, underruns, 0);
                     buffering = true;
                     status_set("Puffert Audiostream ...");
                     ESP_LOGW(TAG, "Audio FIFO underrun %u", underruns);
@@ -381,7 +395,9 @@ static void play_stream(const char *url, uint32_t revision)
             esp_audio_simple_dec_out_t out = {
                 .buffer = pcm, .len = pcm_capacity
             };
+            int64_t decode_started = esp_timer_get_time();
             esp_audio_err_t err = esp_audio_simple_dec_process(decoder, &raw, &out);
+            radio_diag_decode((uint32_t)((esp_timer_get_time() - decode_started) / 1000));
             if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH &&
                 out.needed_size > pcm_capacity &&
                 out.needed_size <= AUDIO_PCM_MAX_CAPACITY) {
@@ -454,11 +470,15 @@ static void play_stream(const char *url, uint32_t revision)
                                             (int32_t)stereo[i * 2 + 1]) / 2);
                     }
                 }
-                if (esp_codec_dev_write(s_speaker, mono,
-                                        (int)(samples * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+                int64_t codec_started = esp_timer_get_time();
+                int codec_result = esp_codec_dev_write(s_speaker, mono,
+                                        (int)(samples * sizeof(int16_t)));
+                radio_diag_codec((uint32_t)((esp_timer_get_time() - codec_started) / 1000));
+                if (codec_result != ESP_CODEC_DEV_OK) {
                     status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
+                radio_diag_audio_written();
                 if (buffering) status_set("Spielt");
                 buffering = false;
                 status_set("Spielt");
@@ -478,6 +498,7 @@ static void play_stream(const char *url, uint32_t revision)
     }
 
 done:
+    radio_diag_note(RD_STREAM_END, underruns, 0);
     if (receiver_started) {
         atomic_store(&pipe.stop, true);
         xSemaphoreTake(pipe.finished, portMAX_DELAY);

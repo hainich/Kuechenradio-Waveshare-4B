@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
+#include "radio_diag.h"
 
 static const char *TAG = "radio_wifi";
 static volatile bool s_connected;
@@ -32,6 +33,7 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         s_connected = false;
         const wifi_event_sta_disconnected_t *ev = (const wifi_event_sta_disconnected_t *)data;
         s_disconnect_reason = (unsigned)ev->reason;
+        radio_diag_note(RD_WIFI_LOST, s_disconnect_reason, 0);
         ESP_LOGW(TAG, "Heim-WLAN getrennt: reason=%u; neuer Verbindungsversuch", (unsigned)ev->reason);
         /* Reconnect in STA and APSTA mode; when credentials are wrong,
          * the fallback task exposes the configuration access point. */
@@ -42,6 +44,7 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         snprintf(s_address, sizeof(s_address), IPSTR, IP2STR(&ev->ip_info.ip));
         s_connected = true;
         s_disconnect_reason = 0;
+        radio_diag_note(RD_WIFI_OK, 0, 0);
         ESP_LOGI(TAG, "Verbunden, Einstellungen: http://%s", s_address);
     }
 }

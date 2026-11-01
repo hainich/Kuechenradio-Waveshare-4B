@@ -9,6 +9,8 @@
 #include "bsp/esp32_s3_touch_lcd_4b.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "radio_diag.h"
 
 static lv_obj_t *s_btn[RADIO_PRESETS];
 static lv_obj_t *s_label[RADIO_PRESETS];
@@ -25,18 +27,31 @@ static uint32_t s_last_rev;
 static void preset_click(lv_event_t *event)
 {
     int index = (int)(intptr_t)lv_event_get_user_data(event);
+    int64_t started = esp_timer_get_time();
     radio_config_select(index);
+    radio_diag_note(RD_UI_ACTION,
+                    (uint32_t)((esp_timer_get_time() - started) / 1000), 100 + index);
 }
 static void slider_event(lv_event_t *event)
 {
     lv_event_code_t type = lv_event_get_code(event);
     int value = lv_slider_get_value(s_slider);
-    radio_config_volume(value, type == LV_EVENT_RELEASED);
+    if (type == LV_EVENT_RELEASED) {
+        int64_t started = esp_timer_get_time();
+        radio_config_volume(value, true);
+        radio_diag_note(RD_UI_ACTION,
+                        (uint32_t)((esp_timer_get_time() - started) / 1000), 200);
+    } else {
+        radio_config_volume(value, false);
+    }
 }
 static void play_event(lv_event_t *event)
 {
     (void)event;
+    int64_t started = esp_timer_get_time();
     radio_config_play(!s_playing);
+    radio_diag_note(RD_UI_ACTION,
+                    (uint32_t)((esp_timer_get_time() - started) / 1000), 300);
 }
 static void station_color(int i, bool active)
 {
@@ -54,6 +69,7 @@ static void label_if_changed(lv_obj_t *label, const char *value)
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
+    radio_diag_ui_tick();
     radio_settings_t cfg;
     radio_config_get(&cfg);
     if (s_last_rev != radio_config_revision()) {
