@@ -35,7 +35,11 @@ typedef enum {
     RD_HTTP_BACKPRESSURE,
     RD_STREAM_FORMAT,
     RD_PCM_LOW,
-    RD_HTTP_GAP
+    RD_HTTP_GAP,
+    RD_HEAP_ALLOCATION_FAILED,
+    RD_DECODER_GAP,
+    RD_PCM_PUSH_BLOCKED,
+    RD_CODEC_MUTEX_WAIT
 } radio_diag_kind_t;
 
 typedef struct {
@@ -133,6 +137,35 @@ typedef struct {
     uint32_t cpu_mhz_config;
     uint32_t psram_mhz_config;
     uint32_t capture_overflows;
+    /* #67 new cause-isolation counters, no new runtime tasks */
+    uint32_t heap_alloc_fail_count;
+    uint32_t heap_alloc_fail_internal_count;
+    uint32_t heap_alloc_fail_last_bytes;
+    uint32_t heap_alloc_fail_last_caps;
+    uint32_t heap_alloc_fail_last_ms;
+    uint32_t heap_internal_min_bytes;
+    uint32_t heap_internal_largest_min_bytes;
+    uint32_t heap_psram_min_bytes;
+    uint32_t decoder_gap_last_ms;
+    uint32_t decoder_gap_max_ms;
+    uint32_t decoder_gap_count_250ms;
+    uint32_t decoder_gap_count_1000ms;
+    uint32_t decoder_gap_while_fifo_full;
+    uint32_t pcm_push_block_count;
+    uint32_t pcm_push_block_max_ms;
+    uint32_t pcm_push_block_total_ms;
+    uint32_t codec_mutex_wait_count;
+    uint32_t codec_mutex_wait_max_ms;
+    uint32_t web_request_count;
+    uint32_t web_error_count;
+    uint32_t web_page_max_ms;
+    uint32_t web_state_max_ms;
+    uint32_t web_history_max_ms;
+    uint32_t web_action_max_ms;
+    uint32_t web_csv_max_ms;
+    uint32_t web_last_ms;
+    uint32_t web_last_path;
+    uint32_t decoder_last_ms;
     radio_diag_event_t events[RADIO_DIAG_HISTORY]; /* newest first */
 } radio_diag_snapshot_t;
 
@@ -163,6 +196,9 @@ typedef struct {
     uint32_t internal_free;
     uint32_t internal_largest;
     uint32_t psram_free;
+    uint32_t heap_fail_count;
+    uint32_t decoder_gap_max_ms;
+    uint32_t web_max_ms;
     uint32_t audio_stack_free;
     uint32_t http_stack_free;
     uint32_t i2s_stack_free;
@@ -191,3 +227,8 @@ void radio_diag_wifi(bool connected, int rssi, uint8_t channel, uint32_t reason)
 void radio_diag_stack(uint32_t task, uint32_t remaining);
 void radio_diag_stream_format(uint32_t sample_rate, uint32_t channels, uint32_t station);
 size_t radio_diag_extended_events(radio_diag_event_t *out, size_t capacity);
+
+void radio_diag_live_snapshot(radio_diag_snapshot_t *out);
+void radio_diag_pcm_push_wait(uint32_t ms);
+void radio_diag_codec_mutex_wait(uint32_t ms);
+void radio_diag_web_request(uint32_t route, uint32_t ms, bool ok);

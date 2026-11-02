@@ -382,7 +382,10 @@ static void pcm_writer_task(void *arg)
                        (uint32_t)sink->ring.capacity);
         xSemaphoreGive(sink->mu);
         if (!n) continue;
+        int64_t codec_lock_started = esp_timer_get_time();
         xSemaphoreTake(sink->codec_mu, portMAX_DELAY);
+        uint32_t lock_wait_ms = (uint32_t)((esp_timer_get_time() - codec_lock_started) / 1000);
+        if (lock_wait_ms) radio_diag_codec_mutex_wait(lock_wait_ms);
         if (atomic_load(&sink->codec_open)) {
             int64_t t0 = esp_timer_get_time();
             int rc = esp_codec_dev_write(s_speaker, chunk, (int)n);
@@ -403,6 +406,7 @@ static void pcm_writer_task(void *arg)
 static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len,
                       uint32_t revision, bool test_tone)
 {
+    int64_t wait_started_us = 0;
     while (len) {
         bool active = test_tone ? radio_lab_mode() == RADIO_LAB_PCM_TONE : wanted(revision);
         if (!active || atomic_load(&sink->failed)) return false;
@@ -412,8 +416,13 @@ static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len,
                        (uint32_t)sink->ring.capacity);
         xSemaphoreGive(sink->mu);
         if (!w) {
+            if (!wait_started_us) wait_started_us = esp_timer_get_time();
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
+        }
+        if (wait_started_us) {
+            radio_diag_pcm_push_wait((uint32_t)((esp_timer_get_time() - wait_started_us) / 1000));
+            wait_started_us = 0;
         }
         data += w;
         len -= w;

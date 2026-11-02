@@ -36,7 +36,7 @@ static esp_err_t home_get(httpd_req_t *req)
     radio_config_get(&cfg);
 
     const size_t capacity = 24576;
-    char *page = malloc(capacity);
+    char *page = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!page) {
         ESP_LOGE(TAG, "Kein Speicher fuer Setup-Seite");
         httpd_resp_send_500(req);
@@ -81,7 +81,7 @@ static esp_err_t home_get(httpd_req_t *req)
         ADD("\"></div>");
     }
     ADD("<button type='submit'>Speichern und neu starten</button></form>"
-        "<p><a style='color:#67e8f9' href='/lab'>Diagnoselabor #66 oeffnen</a></p>"
+        "<p><a style='color:#67e8f9' href='/lab'>Diagnoselabor #67 oeffnen</a></p>"
         "<p><a style='color:#67e8f9' href='/diagnose'>Textdiagnose ansehen</a></p>"
         "<small>Setup-WLAN: Kuechenradio-Setup / Passwort: Kuechenradio123. "
         "Einstellungen im Heimnetz ueber die IP-Adresse des Displays.</small></body></html>");
@@ -162,7 +162,9 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     radio_diag_snapshot_t d;
     radio_diag_snapshot(&d);
     const size_t capacity = 13500;
-    char *report = malloc(capacity);
+    /* Internal RAM was observed below 1 KiB during stalls: use PSRAM for
+     * on-demand reports so opening diagnostics does not demand 13.5 KiB SRAM. */
+    char *report = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!report) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -173,7 +175,7 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / Firmware #66 Erweiterte Messungen\n");
+    REPORT("KUECHENRADIO DIAGNOSE / Firmware #67 Speicher- und Webdiagnose\n");
     REPORT("Web-Diagnoselabor: http://<RADIO-IP>/lab | CSV: /lab/csv\n");
     REPORT("Modus: %d (0=Radio, 1=Testton direkt, 2=Testton PCM) | PCM-Start: %lu KB\n",
            radio_lab_mode(), (unsigned long)radio_lab_prime_kb());
@@ -212,7 +214,7 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     REPORT("WLAN-Abbrueche: %lu | Stream-Starts: %lu | Stream-Enden: %lu\n",
            (unsigned long)d.wifi_disconnects, (unsigned long)d.stream_starts,
            (unsigned long)d.stream_ends);
-    REPORT("\n--- 30-MINUTEN-DIAGNOSE (#66) ---\n");
+    REPORT("\n--- 30-MINUTEN-DIAGNOSE (#67) ---\n");
     REPORT("CPU-Takt konfiguriert %lu MHz | PSRAM-Takt konfiguriert %lu MHz | Audiomodus %d\n",
            (unsigned long)d.cpu_mhz_config, (unsigned long)d.psram_mhz_config, radio_lab_mode());
     REPORT("HTTP zuletzt %ld B (%lu ms) | inflight: %s (%lu ms) | ohne Daten seit %ld ms\n",
@@ -247,6 +249,32 @@ static esp_err_t diagnose_get(httpd_req_t *req)
            (unsigned long)d.stream_sample_rate, (unsigned long)d.stream_channels,
            (unsigned long)d.stream_station, (unsigned long)d.pcm_low_events);
     REPORT("CSV /lab/csv enthaelt bis zu 1800 Messpunkte und 320 Ereignisse, unabhaengig vom geoeffneten Browser.\n");
+    REPORT("HEAP: interne RAM-Minimum %lu B | groesster interner Block-Minimum %lu B | PSRAM-Minimum %lu B\n",
+           (unsigned long)d.heap_internal_min_bytes,
+           (unsigned long)d.heap_internal_largest_min_bytes,
+           (unsigned long)d.heap_psram_min_bytes);
+    REPORT("HEAP: %lu fehlgeschlagene Allokationen (explizit intern: %lu), letzte %lu B (caps 0x%lx) bei %lu ms\n",
+           (unsigned long)d.heap_alloc_fail_count,
+           (unsigned long)d.heap_alloc_fail_internal_count,
+           (unsigned long)d.heap_alloc_fail_last_bytes,
+           (unsigned long)d.heap_alloc_fail_last_caps,
+           (unsigned long)d.heap_alloc_fail_last_ms);
+    REPORT("DECODER: Abstand max %lu ms | Pausen >=250ms %lu | >=1000ms %lu | trotz HTTP-Daten %lu\n",
+           (unsigned long)d.decoder_gap_max_ms,
+           (unsigned long)d.decoder_gap_count_250ms,
+           (unsigned long)d.decoder_gap_count_1000ms,
+           (unsigned long)d.decoder_gap_while_fifo_full);
+    REPORT("PCM-PUSH: %lu Ring-Wartephasen, gesamt %lu ms, max %lu ms | Codec-Mutex max %lu ms\n",
+           (unsigned long)d.pcm_push_block_count,
+           (unsigned long)d.pcm_push_block_total_ms,
+           (unsigned long)d.pcm_push_block_max_ms,
+           (unsigned long)d.codec_mutex_wait_max_ms);
+    REPORT("WEBSERVER: %lu Requests, %lu fehlgeschlagen, max Seite %lu ms, Status %lu ms, Grafik %lu ms, Aktion %lu ms, CSV %lu ms\n",
+           (unsigned long)d.web_request_count,(unsigned long)d.web_error_count,
+           (unsigned long)d.web_page_max_ms,(unsigned long)d.web_state_max_ms,
+           (unsigned long)d.web_history_max_ms,(unsigned long)d.web_action_max_ms,
+           (unsigned long)d.web_csv_max_ms);
+    REPORT("Web-Live-Updates in #67 standardmaessig AUS; optional alle 15 Sekunden.\n");
     REPORT("Letzte erfolgreiche Daten: HTTP %s%lu ms | Audio %s%lu ms | LVGL %s%lu ms\n",
            d.last_http_ms ? "" : "nie/", (unsigned long)(d.last_http_ms ? d.uptime_ms - d.last_http_ms : 0),
            d.last_audio_ms ? "" : "nie/", (unsigned long)(d.last_audio_ms ? d.uptime_ms - d.last_audio_ms : 0),
@@ -282,7 +310,10 @@ void radio_web_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
     cfg.max_uri_handlers = 10;
-    cfg.recv_wait_timeout = 6;
+    cfg.max_open_sockets = 4;
+    cfg.lru_purge_enable = true; /* stale browser connections cannot block the action buttons */
+    cfg.recv_wait_timeout = 3;
+    cfg.send_wait_timeout = 3;
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Webserver start fehlgeschlagen");

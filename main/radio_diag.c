@@ -10,6 +10,8 @@
 #include "freertos/portmacro.h"
 #include <limits.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <stddef.h>
 
 /* Entirely RAM-resident, no NVS, malloc, HTTP or serial writes on hot paths.
  * Critical sections protect brief counter operations and short ring events. */
@@ -29,6 +31,24 @@ static size_t s_ext_next;
 static uint32_t s_diag_last_backpressure_event;
 static uint32_t s_diag_last_age_event;
 static const char *TAG = "radio_diag";
+/* Allocation-failure hook runs while allocator locks may be held: only atomics. */
+static atomic_uint s_heap_fail_count;
+static atomic_uint s_heap_fail_internal_count;
+static atomic_uint s_heap_fail_last_size;
+static atomic_uint s_heap_fail_last_caps;
+static atomic_uint s_heap_fail_last_ms;
+static uint32_t s_heap_fail_seen;
+static void on_alloc_failed(size_t size, uint32_t caps, const char *function_name)
+{
+    (void)function_name;
+    atomic_fetch_add(&s_heap_fail_count, 1);
+    if (caps & MALLOC_CAP_INTERNAL) atomic_fetch_add(&s_heap_fail_internal_count, 1);
+    atomic_store(&s_heap_fail_last_size, (uint32_t)size);
+    atomic_store(&s_heap_fail_last_caps, caps);
+    /* esp_timer_get_time does not allocate; avoid other functions here. */
+    atomic_store(&s_heap_fail_last_ms, (uint32_t)(esp_timer_get_time() / 1000));
+}
+
 
 void radio_diag_init(void)
 {
@@ -40,6 +60,9 @@ void radio_diag_init(void)
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_samples || !s_extended)
         ESP_LOGW(TAG, "PSRAM-Messverlauf teilweise nicht verfuegbar");
+    esp_err_t hook_err = heap_caps_register_failed_alloc_callback(on_alloc_failed);
+    if (hook_err != ESP_OK)
+        ESP_LOGW(TAG, "Heap failure hook nicht aktiv: %d", (int)hook_err);
 #ifdef CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
     s_diag.cpu_mhz_config = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
 #endif
@@ -95,8 +118,8 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
     case RD_UI_LAG: ++s_diag.ui_lags; break;
     case RD_UI_ACTION: ++s_diag.ui_actions; break;
     case RD_WIFI_LOST: ++s_diag.wifi_disconnects; break;
-    case RD_STREAM_START: ++s_diag.stream_starts; break;
-    case RD_STREAM_END: ++s_diag.stream_ends; break;
+    case RD_STREAM_START: ++s_diag.stream_starts; s_diag.decoder_last_ms = 0; break;
+    case RD_STREAM_END: ++s_diag.stream_ends; s_diag.decoder_last_ms = 0; break;
     case RD_AUDIO_FIFO_INTERNAL: s_diag.fifo_backend = 1; break;
     case RD_AUDIO_FIFO_PSRAM: s_diag.fifo_backend = 2; break;
     case RD_AUDIO_DIRECT: s_diag.fifo_backend = 0; break;
@@ -134,11 +157,30 @@ void radio_diag_http_read(int result, uint32_t duration_ms)
 
 void radio_diag_decode(uint32_t duration_ms)
 {
+    uint32_t now = ms_now();
+    uint32_t gap_ms = 0;
+    uint32_t fifo = 0;
+    bool report = false;
     taskENTER_CRITICAL(&s_diag_lock);
     ++s_diag.decode_calls;
     s_diag.decoder_total_ms += duration_ms;
     if (duration_ms > s_diag.decoder_max_ms) s_diag.decoder_max_ms = duration_ms;
+    if (s_diag.decoder_last_ms) {
+        gap_ms = now - s_diag.decoder_last_ms;
+        if (gap_ms > s_diag.decoder_gap_max_ms) s_diag.decoder_gap_max_ms = gap_ms;
+        s_diag.decoder_gap_last_ms = gap_ms;
+        if (gap_ms >= 250) {
+            ++s_diag.decoder_gap_count_250ms;
+            if (gap_ms >= 1000) ++s_diag.decoder_gap_count_1000ms;
+            fifo = s_diag.fifo_bytes;
+            if (fifo >= s_diag.fifo_capacity / 2 && s_diag.fifo_capacity)
+                ++s_diag.decoder_gap_while_fifo_full;
+            report = true;
+        }
+    }
+    s_diag.decoder_last_ms = now;
     taskEXIT_CRITICAL(&s_diag_lock);
+    if (report) radio_diag_note(RD_DECODER_GAP, gap_ms, fifo >= 8192 ? 1 : 0);
     if (duration_ms >= 100) radio_diag_note(RD_DECODER_SLOW, duration_ms, 0);
 }
 
@@ -237,6 +279,10 @@ const char *radio_diag_name(radio_diag_kind_t kind)
     case RD_STREAM_FORMAT: return "STREAM_FORMAT";
     case RD_PCM_LOW: return "PCM_LOW_LEVEL";
     case RD_HTTP_GAP: return "HTTP_NO_PAYLOAD_STREAK";
+    case RD_HEAP_ALLOCATION_FAILED: return "HEAP_ALLOC_FAILED";
+    case RD_DECODER_GAP: return "DECODER_INTERVAL_GAP";
+    case RD_PCM_PUSH_BLOCKED: return "PCM_RING_WRITE_WAIT";
+    case RD_CODEC_MUTEX_WAIT: return "CODEC_MUTEX_WAIT";
     default: return "UNKNOWN";
     }
 }
@@ -311,6 +357,11 @@ void radio_diag_sample(void)
     uint32_t free_internal = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     uint32_t largest_internal = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     uint32_t free_psram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint32_t fail_count = atomic_load(&s_heap_fail_count);
+    uint32_t fail_internal = atomic_load(&s_heap_fail_internal_count);
+    uint32_t fail_size = atomic_load(&s_heap_fail_last_size);
+    uint32_t fail_caps = atomic_load(&s_heap_fail_last_caps);
+    uint32_t fail_time = atomic_load(&s_heap_fail_last_ms);
     uint32_t now = ms_now();
     bool report_http_gap = false;
     uint32_t gap_value = 0;
@@ -329,6 +380,20 @@ void radio_diag_sample(void)
     s->internal_free = free_internal;
     s->internal_largest = largest_internal;
     s->psram_free = free_psram;
+    s->heap_fail_count = fail_count;
+    s->decoder_gap_max_ms = s_diag.decoder_gap_max_ms;
+    s->web_max_ms = s_diag.web_page_max_ms > s_diag.web_state_max_ms ? s_diag.web_page_max_ms : s_diag.web_state_max_ms;
+    s_diag.heap_alloc_fail_count = fail_count;
+    s_diag.heap_alloc_fail_internal_count = fail_internal;
+    s_diag.heap_alloc_fail_last_bytes = fail_size;
+    s_diag.heap_alloc_fail_last_caps = fail_caps;
+    s_diag.heap_alloc_fail_last_ms = fail_time;
+    if (!s_diag.heap_internal_min_bytes || free_internal < s_diag.heap_internal_min_bytes)
+        s_diag.heap_internal_min_bytes = free_internal;
+    if (!s_diag.heap_internal_largest_min_bytes || largest_internal < s_diag.heap_internal_largest_min_bytes)
+        s_diag.heap_internal_largest_min_bytes = largest_internal;
+    if (!s_diag.heap_psram_min_bytes || free_psram < s_diag.heap_psram_min_bytes)
+        s_diag.heap_psram_min_bytes = free_psram;
     s->audio_stack_free = s_diag.audio_stack_free;
     s->http_stack_free = s_diag.http_stack_free;
     s->i2s_stack_free = s_diag.i2s_stack_min_bytes;
@@ -351,6 +416,10 @@ void radio_diag_sample(void)
     }
     taskEXIT_CRITICAL(&s_diag_lock);
     if (report_http_gap) radio_diag_note(RD_HTTP_GAP, gap_value, 0);
+    if (fail_count != s_heap_fail_seen) {
+        s_heap_fail_seen = fail_count;
+        radio_diag_note(RD_HEAP_ALLOCATION_FAILED, fail_size, (int)(fail_caps & 0x7fff));
+    }
 }
 
 size_t radio_diag_history(radio_diag_sample_t *out, size_t capacity)
@@ -464,4 +533,56 @@ void radio_diag_stream_format(uint32_t sample_rate, uint32_t channels, uint32_t 
     s_diag.stream_station = station;
     taskEXIT_CRITICAL(&s_diag_lock);
     if (changed) radio_diag_note(RD_STREAM_FORMAT, sample_rate, (int)channels);
+}
+
+/* Web endpoints need scalars, not a sorted copy of the event ring. */
+void radio_diag_live_snapshot(radio_diag_snapshot_t *out)
+{
+    if (!out) return;
+    taskENTER_CRITICAL(&s_diag_lock);
+    memcpy(out, &s_diag, offsetof(radio_diag_snapshot_t, events));
+    taskEXIT_CRITICAL(&s_diag_lock);
+    out->uptime_ms = ms_now();
+    out->heap_alloc_fail_count = atomic_load(&s_heap_fail_count);
+    out->heap_alloc_fail_internal_count = atomic_load(&s_heap_fail_internal_count);
+    out->heap_alloc_fail_last_bytes = atomic_load(&s_heap_fail_last_size);
+    out->heap_alloc_fail_last_caps = atomic_load(&s_heap_fail_last_caps);
+    out->heap_alloc_fail_last_ms = atomic_load(&s_heap_fail_last_ms);
+}
+
+void radio_diag_pcm_push_wait(uint32_t ms)
+{
+    if (!ms) return;
+    taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.pcm_push_block_count;
+    s_diag.pcm_push_block_total_ms += ms;
+    if (ms > s_diag.pcm_push_block_max_ms) s_diag.pcm_push_block_max_ms = ms;
+    taskEXIT_CRITICAL(&s_diag_lock);
+    if (ms >= 100) radio_diag_note(RD_PCM_PUSH_BLOCKED, ms, 0);
+}
+
+void radio_diag_codec_mutex_wait(uint32_t ms)
+{
+    if (!ms) return;
+    taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.codec_mutex_wait_count;
+    if (ms > s_diag.codec_mutex_wait_max_ms) s_diag.codec_mutex_wait_max_ms = ms;
+    taskEXIT_CRITICAL(&s_diag_lock);
+    if (ms >= 50) radio_diag_note(RD_CODEC_MUTEX_WAIT, ms, 0);
+}
+
+/* route: 1=/lab, 2=/lab/state, 3=/lab/history, 4=/lab/set|mark, 5=/lab/csv. */
+void radio_diag_web_request(uint32_t route, uint32_t ms, bool ok)
+{
+    taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.web_request_count;
+    if (!ok) ++s_diag.web_error_count;
+    s_diag.web_last_ms = ms;
+    s_diag.web_last_path = route;
+    uint32_t *max = route == 1 ? &s_diag.web_page_max_ms :
+                    route == 2 ? &s_diag.web_state_max_ms :
+                    route == 3 ? &s_diag.web_history_max_ms :
+                    route == 5 ? &s_diag.web_csv_max_ms : &s_diag.web_action_max_ms;
+    if (ms > *max) *max = ms;
+    taskEXIT_CRITICAL(&s_diag_lock);
 }

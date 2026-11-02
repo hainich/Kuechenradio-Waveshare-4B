@@ -1,7 +1,7 @@
 name: ESP32-S3 Küchenradio Firmware
 on:
   push:
-    branches: [main, audio-atlascube-codecs, audio-recovery-from-36, diagnose-from-49, fix-audio-memory-from-55, rollback56-pwr-from58, touch-audio-async-nvs-from60, pcm-writer-patch-from63, diagnostic-lab-from64, diagnostics-extended-from65]
+    branches: [main, audio-atlascube-codecs, audio-recovery-from-36, diagnose-from-49, fix-audio-memory-from-55, rollback56-pwr-from58, touch-audio-async-nvs-from60, pcm-writer-patch-from63, diagnostic-lab-from64, diagnostics-extended-from65, diagnostic-lowmem-web-from66]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -57,6 +57,13 @@ jobs:
           grep -q 'radio_diag_http_open' main/radio_stream.c
           grep -q 'radio_diag_extended_events' main/radio_lab_web.c
           grep -q 'wifi_ap_record_t ap_info' main/radio_wifi.c
+          grep -q 'heap_caps_register_failed_alloc_callback' main/radio_diag.c
+          grep -q 'radio_diag_live_snapshot' main/radio_lab_web.c
+          grep -q 's_applied_interval_ms' main/radio_ui.c
+          grep -q 'radio_diag_pcm_push_wait' main/radio_stream.c
+          grep -q 'radio_diag_codec_mutex_wait' main/radio_stream.c
+          grep -q 'lru_purge_enable = true' main/radio_web.c
+          grep -q 'kuechenradio67_diagnose.csv' main/radio_lab_web.c
           grep -q 'esp_audio_dec_register_default' main/radio_stream.c
       - name: Build update and factory images
         run: |
