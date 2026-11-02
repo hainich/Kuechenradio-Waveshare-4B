@@ -335,7 +335,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
         const radio_diag_event_t *e = &d.events[i];
         int n = snprintf(row, sizeof(row),
             "event;%lu;%lu;;;;;%s;%lu;%d;%ld;%ld;%ld\n",
-            (unsigned long)e->ms, (unsigned long)e->fifo_bytes,
+            (unsigned long)e->ms, (unsigned long)e->pcm_bytes,
             radio_diag_name((radio_diag_kind_t)e->kind),
             (unsigned long)e->value, (int)e->aux,
             e->network_age_ms == UINT32_MAX ? -1L : (long)e->network_age_ms,

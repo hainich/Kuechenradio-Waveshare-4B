@@ -36,6 +36,7 @@ typedef struct {
     uint32_t ms;
     uint32_t value;
     uint32_t fifo_bytes;
+    uint32_t pcm_bytes;
     uint32_t network_age_ms;
     uint32_t audio_age_ms;
     uint32_t ui_age_ms;
@@ -107,6 +108,7 @@ typedef struct {
     uint32_t internal_free;
 } radio_diag_sample_t;
 
+void radio_diag_init(void);
 void radio_diag_pcm(uint32_t used, uint32_t capacity);
 void radio_diag_pcm_underrun(void);
 void radio_diag_i2s_result(bool ok);

@@ -3,6 +3,7 @@
 #include "radio_web.h"
 #include "radio_ui.h"
 #include "radio_stream.h"
+#include "radio_diag.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
@@ -20,6 +21,7 @@ void app_main(void)
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
     tzset();
     radio_config_init();
+    radio_diag_init();
     radio_wifi_start();
     radio_web_start();
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);

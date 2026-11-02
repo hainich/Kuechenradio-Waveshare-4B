@@ -375,6 +375,8 @@ static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len,
         if (!active || atomic_load(&sink->failed)) return false;
         xSemaphoreTake(sink->mu, portMAX_DELAY);
         size_t w = audio_ring_write(&sink->ring, data, len);
+        radio_diag_pcm((uint32_t)audio_ring_available(&sink->ring),
+                       (uint32_t)sink->ring.capacity);
         xSemaphoreGive(sink->mu);
         if (!w) {
             vTaskDelay(pdMS_TO_TICKS(5));

@@ -15,10 +15,18 @@ static radio_diag_snapshot_t s_diag;
 static uint32_t s_next_event;
 static uint32_t s_num_events;
 static uint32_t s_last_http_no_data_event_ms;
-static radio_diag_sample_t s_samples[RADIO_DIAG_SAMPLES];
+/* The 120-point history must NOT consume scarce internal SRAM.
+ * Allocate it once in external PSRAM during boot. */
+static radio_diag_sample_t *s_samples;
 static size_t s_samples_count;
 static size_t s_samples_next;
 
+void radio_diag_init(void)
+{
+    s_samples = heap_caps_calloc(RADIO_DIAG_SAMPLES,
+                                 sizeof(radio_diag_sample_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
 static uint32_t ms_now(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint32_t age(uint32_t now, uint32_t then) {
     return then ? now - then : UINT32_MAX;
@@ -46,6 +54,7 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
     ev->kind = (uint16_t)kind;
     ev->aux = (int16_t)aux;
     ev->fifo_bytes = s_diag.fifo_bytes;
+    ev->pcm_bytes = s_diag.pcm_bytes;
     ev->network_age_ms = age(now, s_diag.last_http_ms);
     ev->audio_age_ms = age(now, s_diag.last_audio_ms);
     ev->ui_age_ms = age(now, s_diag.last_ui_ms);
@@ -255,6 +264,7 @@ void radio_diag_mark(void)
 
 void radio_diag_sample(void)
 {
+    if (!s_samples) return;
     uint32_t free_internal = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     uint32_t now = ms_now();
     taskENTER_CRITICAL(&s_diag_lock);
@@ -272,7 +282,7 @@ void radio_diag_sample(void)
 
 size_t radio_diag_history(radio_diag_sample_t *out, size_t capacity)
 {
-    if (!out || capacity == 0) return 0;
+    if (!out || capacity == 0 || !s_samples) return 0;
     taskENTER_CRITICAL(&s_diag_lock);
     size_t n = s_samples_count < capacity ? s_samples_count : capacity;
     size_t start = (s_samples_next + RADIO_DIAG_SAMPLES - n) % RADIO_DIAG_SAMPLES;
