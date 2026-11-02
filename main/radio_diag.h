@@ -143,6 +143,7 @@ typedef struct {
     uint32_t heap_alloc_fail_last_bytes;
     uint32_t heap_alloc_fail_last_caps;
     uint32_t heap_alloc_fail_last_ms;
+    uint32_t heap_alloc_fail_function_hash; /* FNV-1a hash of allocator API name */
     uint32_t heap_internal_min_bytes;
     uint32_t heap_internal_largest_min_bytes;
     uint32_t heap_psram_min_bytes;
