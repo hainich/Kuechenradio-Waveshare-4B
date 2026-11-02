@@ -42,6 +42,15 @@ static void touch_down(lv_event_t *ev)
     radio_diag_touch_press((int)(intptr_t)lv_event_get_user_data(ev));
 }
 
+/* Web UI may be unavailable if internal RAM is exhausted.
+ * Long-pressing the header still records a timestamp locally. */
+static void diagnose_mark_long_press(lv_event_t *ev)
+{
+    (void)ev;
+    radio_diag_mark();
+    if (s_status) lv_label_set_text(s_status, "Diagnose: Stoerung markiert");
+}
+
 
 static void preset_click(lv_event_t *event)
 {
@@ -158,6 +167,8 @@ void radio_ui_start(void)
 
     lv_obj_t *headline = lv_label_create(screen);
     lv_label_set_text(headline, "KUECHENRADIO");
+    lv_obj_add_flag(headline, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(headline, diagnose_mark_long_press, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_set_pos(headline, 24, 15);
     lv_obj_set_style_text_color(headline, lv_color_hex(0x67E8F9), 0);
 #if LV_FONT_MONTSERRAT_20
