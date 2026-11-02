@@ -82,7 +82,7 @@ static const char LAB_PAGE[] =
 "const groups=[\n"
 "['Audio',[['pcm_bytes','PCM aktuell','kb'],['pcm_capacity','PCM-Kapazität','kb'],['pcm_underruns','PCM-Unterläufe'],['fifo_underruns','HTTP-Puffer-Unterläufe'],['pcm_low','PCM knapp gefüllt'],['i2s_errors','I2S-Fehler'],['codec_max','Codec-Write Maximum','ms'],['codec_mutex_max','Codec-Mutex-Wartezeit max.','ms'],['pcm_push_max','PCM-Schreibwartezeit max.','ms'],['pcm_push_count','PCM-Warteereignisse'],['decoder_max','Decoder-Ausführung max.','ms'],['decoder_gap_max','Decoder-Aufrufabstand max.','ms'],['decoder_gap_fifo','Decoder-Pause trotz HTTP-Daten'],['decoder_gap_over_1000','Decoder-Pausen über 1 s']]],\n"
 "['Netzwerk',[['rssi','WLAN-RSSI','dbm'],['wifi_channel','WLAN-Kanal'],['wifi_last_reason','Letzter WLAN-Abbruchcode'],['wifi_lost','WLAN-Abbrüche'],['http_last_read','Letzter HTTP-Read','ms'],['http_running','Laufender HTTP-Read','ms'],['http_age','Seit letztem HTTP-Byte','ms'],['http_max','HTTP-Lesezeit max.','ms'],['http_gt_1000','HTTP-Reads über 1 s'],['http_gt_4000','HTTP-Reads über 4 s'],['http_zero','HTTP-Reads ohne Daten'],['http_negative','HTTP-Fehler / EAGAIN'],['http_connect_max','HTTP-Verbindungsaufbau max.','ms'],['http_connect_failures','HTTP-Verbindungsfehler'],['http_status','Letzter HTTP-Status'],['http_bytes','Empfangene Audiodaten','kb'],['fifo_bytes','HTTP-Puffer aktuell','kb'],['fifo_capacity','HTTP-Puffer-Kapazität','kb']]],\n"
-"['Speicher / Tasks',[['ram_free','Interner RAM frei','kb'],['ram_largest','Größter interner Block','kb'],['ram_min','Interner RAM-Minimum','kb'],['ram_largest_min','Größter Block-Minimum','kb'],['psram_free','PSRAM frei','kb'],['heap_fail','Allokationsfehler'],['heap_fail_internal','Davon intern angefordert'],['heap_fail_size','Letzte Fehlanforderung','bytes'],['heap_fail_caps','Letzte Heap-Caps','hex'],['audio_stack','Audio-Stack frei','kb'],['http_stack','HTTP-Stack frei','kb'],['i2s_stack','I2S-Stack frei','kb'],['wifi_stack','WLAN-Task-Stack frei','kb']]],\n"
+"['Speicher / Tasks',[['ram_free','Interner RAM frei','kb'],['ram_largest','Größter interner Block','kb'],['ram_min','Interner RAM-Minimum','kb'],['ram_largest_min','Größter Block-Minimum','kb'],['psram_free','PSRAM frei','kb'],['heap_fail','Allokationsfehler'],['heap_fail_internal','Davon intern angefordert'],['heap_fail_size','Letzte Fehlanforderung','bytes'],['heap_fail_caps','Letzte Heap-Caps','hex'],['heap_fail_function','Allokations-API (Hash)','hex'],['audio_stack','Audio-Stack frei','kb'],['http_stack','HTTP-Stack frei','kb'],['i2s_stack','I2S-Stack frei','kb'],['wifi_stack','WLAN-Task-Stack frei','kb']]],\n"
 "['Webserver / Betrieb',[['web_calls','Web-Anfragen gesamt'],['web_errors','Web-Übertragungsfehler'],['web_page_max','Web-Seite max.','ms'],['web_state_max','Web-Status max.','ms'],['web_history_max','Web-Grafik max.','ms'],['web_action_max','Web-Aktion max.','ms'],['web_csv_max','CSV-Export max.','ms'],['cpu_mhz','CPU-Takt','mhz'],['psram_mhz','PSRAM-Takt','mhz'],['touches','Touch-Ereignisse'],['marks','Störungsmarken']]]\n"
 "];\n"
 "const nodes={};for(const [title,fields] of groups){\n"
@@ -189,7 +189,7 @@ static esp_err_t lab_state(httpd_req_t *req)
         "\"http_connect_failures\":%lu,\"http_status\":%lu,\"http_redirects\":%lu,"
         "\"http_wait_full\":%lu,\"audio_stack\":%lu,\"http_stack\":%lu,"
         "\"sample_rate\":%lu,\"channels\":%lu,\"cpu_mhz\":%lu,\"psram_mhz\":%lu,"
-        "\"heap_fail\":%lu,\"heap_fail_internal\":%lu,\"heap_fail_size\":%lu,\"heap_fail_caps\":%lu,"
+        "\"heap_fail\":%lu,\"heap_fail_internal\":%lu,\"heap_fail_size\":%lu,\"heap_fail_caps\":%lu,\"heap_fail_function\":%lu,"
         "\"ram_min\":%lu,\"ram_largest_min\":%lu,\"wifi_stack\":%lu,"
         "\"decoder_gap_max\":%lu,\"decoder_gap_over_1000\":%lu,\"decoder_gap_fifo\":%lu,"
         "\"pcm_push_max\":%lu,\"pcm_push_count\":%lu,\"codec_mutex_max\":%lu,"
@@ -231,6 +231,7 @@ static esp_err_t lab_state(httpd_req_t *req)
         (unsigned long)d.heap_alloc_fail_internal_count,
         (unsigned long)d.heap_alloc_fail_last_bytes,
         (unsigned long)d.heap_alloc_fail_last_caps,
+        (unsigned long)d.heap_alloc_fail_function_hash,
         (unsigned long)d.heap_internal_min_bytes,
         (unsigned long)d.heap_internal_largest_min_bytes,
         (unsigned long)d.wifi_stack_free,
