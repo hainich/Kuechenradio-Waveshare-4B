@@ -2,6 +2,7 @@
 #include "esp_timer.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
+#include "radio_ui.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include <limits.h>
@@ -127,8 +128,10 @@ void radio_diag_ui_tick(void)
     uint32_t interval = previous ? now - previous : 0;
     if (interval > s_diag.ui_max_lag_ms) s_diag.ui_max_lag_ms = interval;
     taskEXIT_CRITICAL(&s_diag_lock);
-    /* LVGL refresh period is 1000 ms; >1800 ms means a late callback. */
-    if (previous && interval >= 1800) radio_diag_note(RD_UI_LAG, interval, 0);
+    /* Compare to the selected information-refresh interval, not a hardcoded
+     * 1000 ms. The true LVGL renderer has its own independent scheduling. */
+    if (previous && interval >= radio_ui_interval_get() + 800)
+        radio_diag_note(RD_UI_LAG, interval, 0);
 }
 
 void radio_diag_fifo(uint32_t used, uint32_t capacity)
@@ -199,7 +202,9 @@ void radio_diag_pcm(uint32_t used, uint32_t capacity)
         }
         s_diag.pcm_capacity = capacity;
         s_diag.pcm_bytes = used;
-        if (used < s_diag.pcm_min_bytes) s_diag.pcm_min_bytes = used;
+        /* Exclude the initially empty, unprimed ring from the low-water mark.
+         * Real emptiness after playback starts is counted separately. */
+        if (used > 0 && used < s_diag.pcm_min_bytes) s_diag.pcm_min_bytes = used;
         if (used > s_diag.pcm_max_bytes) s_diag.pcm_max_bytes = used;
     }
     taskEXIT_CRITICAL(&s_diag_lock);

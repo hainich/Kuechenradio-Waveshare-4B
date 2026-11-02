@@ -208,17 +208,24 @@ static esp_err_t lab_state(httpd_req_t *req)
 
 static esp_err_t lab_history(httpd_req_t *req)
 {
+    /* Return the time series in ONE response rather than 120 small writes.
+     * Otherwise observing the lab would perturb the Wi-Fi/audio timing. */
     radio_diag_sample_t *items = heap_caps_malloc(
         sizeof(radio_diag_sample_t) * RADIO_DIAG_SAMPLES,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!items) { httpd_resp_send_500(req); return ESP_FAIL; }
-    size_t n = radio_diag_history(items, RADIO_DIAG_SAMPLES);
-    httpd_resp_set_type(req, "application/json; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
-    char row[152];
-    for (size_t i = 0; i < n && err == ESP_OK; ++i) {
-        int written = snprintf(row, sizeof(row),
+    char *response = heap_caps_malloc(16000, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!items || !response) {
+        heap_caps_free(items);
+        heap_caps_free(response);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t count = radio_diag_history(items, RADIO_DIAG_SAMPLES);
+    const size_t capacity = 16000;
+    size_t used = 0;
+    response[used++] = '[';
+    for (size_t i = 0; i < count; ++i) {
+        int n = snprintf(response + used, capacity - used,
              "%s{\"t\":%lu,\"pcm\":%lu,\"ram\":%lu,\"http\":%lu,\"under\":%lu,\"touch\":%lu}",
              i ? "," : "", (unsigned long)items[i].ms,
              (unsigned long)items[i].pcm_bytes,
@@ -226,12 +233,20 @@ static esp_err_t lab_history(httpd_req_t *req)
              (unsigned long)items[i].http_bytes,
              (unsigned long)items[i].pcm_underruns,
              (unsigned long)items[i].touch_presses);
-        if (written < 0 || written >= (int)sizeof(row)) { err = ESP_FAIL; break; }
-        err = httpd_resp_send_chunk(req, row, written);
+        if (n < 0 || (size_t)n >= capacity - used - 2) {
+            heap_caps_free(items);
+            heap_caps_free(response);
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+        used += (size_t)n;
     }
-    if (err == ESP_OK) err = httpd_resp_send_chunk(req, "]", 1);
-    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    response[used++] = ']';
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(req, response, used);
     heap_caps_free(items);
+    heap_caps_free(response);
     return err;
 }
 
