@@ -155,15 +155,26 @@ static esp_http_client_handle_t open_stream(const char *url, esp_audio_simple_de
             .keep_alive_enable = true,
         };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        if (!client) return NULL;
+        if (!client) {
+            radio_diag_http_open(ESP_ERR_NO_MEM, 0, 0, false);
+            return NULL;
+        }
         /* Prevent metadata blocks being inserted into the compressed MP3 stream. */
         esp_http_client_set_header(client, "Icy-MetaData", "0");
-        if (esp_http_client_open(client, 0) != ESP_OK) {
+        int64_t connection_started = esp_timer_get_time();
+        esp_err_t open_err = esp_http_client_open(client, 0);
+        if (open_err != ESP_OK) {
+            radio_diag_http_open((int32_t)open_err, 0,
+                (uint32_t)((esp_timer_get_time() - connection_started) / 1000), false);
             esp_http_client_cleanup(client);
             return NULL;
         }
         esp_http_client_fetch_headers(client);
         int status = esp_http_client_get_status_code(client);
+        bool is_redirect = status == 301 || status == 302 || status == 303 ||
+                           status == 307 || status == 308;
+        radio_diag_http_open(0, status,
+            (uint32_t)((esp_timer_get_time() - connection_started) / 1000), is_redirect);
         ESP_LOGI(TAG, "HTTP %d %s", status, target);
         if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && headers.redirect[0]) {
             /* Absolute HTTP(S) redirects only. */
@@ -256,14 +267,29 @@ static void http_receiver_task(void *arg)
     uint8_t packet[AUDIO_NETWORK_PACKET];
     int64_t last_payload_us = esp_timer_get_time();
     int64_t last_warning_us = last_payload_us;
+    uint32_t reads_since_stack_check = 0;
+    uint32_t backpressure_ticks = 0;
     while (!atomic_load(&pipe->stop) && wanted(pipe->revision)) {
         if (pipe_space(pipe) < sizeof(packet)) {
+            /* Differentiates server silence from intentional receive backpressure. */
+            if (++backpressure_ticks >= 10) {
+                radio_diag_http_backpressure(backpressure_ticks * 10);
+                backpressure_ticks = 0;
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        if (backpressure_ticks) {
+            radio_diag_http_backpressure(backpressure_ticks * 10);
+            backpressure_ticks = 0;
+        }
         int64_t read_started = esp_timer_get_time();
+        radio_diag_http_inflight(true);
         int n = esp_http_client_read(pipe->http, (char *)packet, sizeof(packet));
+        radio_diag_http_inflight(false);
         radio_diag_http_read(n, (uint32_t)((esp_timer_get_time() - read_started) / 1000));
+        if ((++reads_since_stack_check & 127U) == 0)
+            radio_diag_stack(1, (uint32_t)uxTaskGetStackHighWaterMark(NULL));
         if (n > 0) {
             last_payload_us = esp_timer_get_time();
             /* Only the consumer can change free space, and it increases it. */
@@ -324,6 +350,7 @@ static void pcm_writer_task(void *arg)
     pcm_sink_t *sink = (pcm_sink_t *)arg;
     uint8_t chunk[PCM_WRITE_CHUNK];
     bool primed = false;
+    bool low_recorded = false;
     uint32_t writer_calls = 0;
     while (!atomic_load(&sink->stop)) {
         size_t used = sink_used(sink);
@@ -334,6 +361,12 @@ static void pcm_writer_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
             }
+        }
+        if (primed && used < 2048 && !low_recorded) {
+            radio_diag_note(RD_PCM_LOW, (uint32_t)used, 0);
+            low_recorded = true;
+        } else if (used >= 4096) {
+            low_recorded = false;
         }
         if (used == 0) {
             /* Real PCM underrun: wait until the ring is primed again. */
@@ -401,7 +434,7 @@ static void sink_drain(pcm_sink_t *sink, uint32_t revision)
     atomic_store(&sink->flushing, false);
 }
 
-static void play_stream(const char *url, uint32_t revision)
+static void play_stream(const char *url, uint32_t revision, uint32_t station)
 {
     esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
     esp_http_client_handle_t http = open_stream(url, &type);
@@ -429,6 +462,8 @@ static void play_stream(const char *url, uint32_t revision)
     int active_rate = 0;
     int volume_applied = -1;
     unsigned underruns = 0;
+    uint32_t audio_loops = 0;
+    radio_diag_stack(0, (uint32_t)uxTaskGetStackHighWaterMark(NULL));
 
     atomic_init(&pipe.stop, false);
     atomic_init(&pipe.eof, false);
@@ -567,7 +602,9 @@ static void play_stream(const char *url, uint32_t revision)
              * zero-byte read as an ended live stream. Measure this path too:
              * previously the /diagnose report falsely showed HTTP=0 for it. */
             int64_t direct_started = esp_timer_get_time();
+            radio_diag_http_inflight(true);
             n = esp_http_client_read(http, (char *)encoded, AUDIO_READ_SIZE);
+            radio_diag_http_inflight(false);
             radio_diag_http_read(n,
                 (uint32_t)((esp_timer_get_time() - direct_started) / 1000));
             if (n > 0) {
@@ -624,6 +661,8 @@ static void play_stream(const char *url, uint32_t revision)
                     goto done;
                 }
                 size_t samples = out.decoded_size / (info.channel * sizeof(int16_t));
+                if (!opened || active_rate != (int)info.sample_rate)
+                    radio_diag_stream_format(info.sample_rate, info.channel, station);
                 if (!opened || active_rate != (int)info.sample_rate) {
                     if (opened) {
                         sink_drain(&sink, revision);
@@ -667,6 +706,8 @@ static void play_stream(const char *url, uint32_t revision)
                                              (int32_t)frame[i * 2 + 1]) / 2);
                     }
                 }
+                if ((++audio_loops & 127U) == 0)
+                    radio_diag_stack(0, (uint32_t)uxTaskGetStackHighWaterMark(NULL));
                 if (!sink_push(&sink, pcm, samples * sizeof(int16_t), revision, false)) {
                     if (atomic_load(&sink.failed)) status_set("Audioausgabe fehlgeschlagen");
                     goto done;
@@ -697,6 +738,7 @@ done:
         xSemaphoreTake(pipe.finished, portMAX_DELAY);
         ESP_LOGI(TAG, "Audiopuffer-Unterlaeufe: %u", underruns);
     }
+    radio_diag_stack(0, (uint32_t)uxTaskGetStackHighWaterMark(NULL));
     ESP_LOGI(TAG, "Audiotask stack high-water: %u B free",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
     if (sink.task_started) {
@@ -857,7 +899,7 @@ static void stream_task(void *arg)
         }
         uint32_t revision = radio_config_revision();
         status_set("Verbinde mit Sender ...");
-        play_stream(cfg.stations[cfg.station].url, revision);
+        play_stream(cfg.stations[cfg.station].url, revision, (uint32_t)cfg.station);
         vTaskDelay(pdMS_TO_TICKS(radio_lab_mode() == RADIO_LAB_RADIO ? 1500 : 100));
     }
 }

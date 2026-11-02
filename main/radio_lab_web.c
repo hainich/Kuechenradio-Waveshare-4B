@@ -16,7 +16,7 @@
 static const char LAB_PAGE[] =
 "<!doctype html>\n"
 "<html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-"<title>Küchenradio | Diagnoselabor</title>\n"
+"<title>Küchenradio | Diagnose Plus</title>\n"
 "<style>\n"
 ":root{color-scheme:dark;font-family:system-ui,Arial;background:#0b1422;color:#ecf5f6}\n"
 "body{max-width:1000px;margin:0 auto;padding:18px 14px 60px}\n"
@@ -37,8 +37,8 @@ static const char LAB_PAGE[] =
 "code{color:#a5f3fc}button:disabled{opacity:.5}\n"
 "</style></head><body>\n"
 "<p><a href=\"/\">← Sender konfigurieren</a> · <a href=\"/diagnose\">Textdiagnose</a> · <a href=\"/lab/csv\">CSV-Diagnose exportieren</a></p>\n"
-"<h1>🔬 Küchenradio Diagnoselabor #65</h1>\n"
-"<p>Messwerte werden jede Sekunde erfasst. Alle Test-Einstellungen sind <b>temporär</b> und gehen beim Neustart verloren.</p>\n"
+"<h1>🔬 Küchenradio Diagnoselabor #66</h1>\n"
+"<p>Live: letzte 120 Sekunden. CSV: bis zu <b>30 Minuten</b> Zeitverlauf und 320 Ereignisse. Die bisher stabilen Audioeinstellungen bleiben unverändert.</p>\n"
 "<div class=\"grid\">\n"
 "<div class=\"card\"><small>Modus</small><span class=\"kpi\" id=\"modeName\">–</span></div>\n"
 "<div class=\"card\"><small>PCM-Ring</small><span class=\"kpi\" id=\"pcmLevel\">–</span><span class=\"caption\" id=\"pcmRange\"></span></div>\n"
@@ -50,6 +50,21 @@ static const char LAB_PAGE[] =
 "<div class=\"card\"><small>Größter RAM-Block</small><span class=\"kpi\" id=\"largest\">–</span></div>\n"
 "<div class=\"card\"><small>I2S-Stackreserve</small><span class=\"kpi\" id=\"stack\">–</span></div>\n"
 "<div class=\"card\"><small>WLAN-Signal</small><span class=\"kpi\" id=\"rssi\">–</span></div>\n"
+"<div class=\"card\"><small>WLAN-Kanal</small><span class=\"kpi\" id=\"wifiChannel\">–</span></div>\n"
+"<div class=\"card\"><small>Letzter WLAN-Abbruchgrund</small><span class=\"kpi\" id=\"wifiReason\">–</span></div>\n"
+"<div class=\"card\"><small>Letzter HTTP-Read</small><span class=\"kpi\" id=\"httpRead\">–</span></div>\n"
+"<div class=\"card\"><small>Letzte HTTP-Daten</small><span class=\"kpi\" id=\"httpAge\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Reads ≥1 Sek.</small><span class=\"kpi\" id=\"httpSlow\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Reads ≥4 Sek.</small><span class=\"kpi\" id=\"httpVerySlow\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Verbindungsaufbau max.</small><span class=\"kpi\" id=\"httpConnect\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Status</small><span class=\"kpi\" id=\"httpStatus\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-FIFO-Füllstand</small><span class=\"kpi\" id=\"fifoLevel\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Puffer voll / Wartezeit</small><span class=\"kpi\" id=\"httpFull\">–</span></div>\n"
+"<div class=\"card\"><small>Audio-Task-Stackreserve</small><span class=\"kpi\" id=\"audioStack\">–</span></div>\n"
+"<div class=\"card\"><small>HTTP-Task-Stackreserve</small><span class=\"kpi\" id=\"httpStack\">–</span></div>\n"
+"<div class=\"card\"><small>PSRAM frei</small><span class=\"kpi\" id=\"psram\">–</span></div>\n"
+"<div class=\"card\"><small>PCM knapp gefüllt</small><span class=\"kpi\" id=\"pcmLow\">–</span></div>\n"
+"<div class=\"card\"><small>CPU- / PSRAM-Takt</small><span class=\"kpi\" id=\"clocks\">–</span></div>\n"
 "</div>\n"
 "<section>\n"
 "<h2>Audiokette isolieren</h2>\n"
@@ -74,6 +89,9 @@ static const char LAB_PAGE[] =
 "<h2>PCM-Füllstand · letzte 120 Sekunden</h2><canvas id=\"pcmChart\"></canvas>\n"
 "<p class=\"caption\">0 KB = PCM-Ring leer; das beweist nicht automatisch eine hörbare I2S-DMA-Unterbrechung.</p>\n"
 "<h2>Freier interner RAM · letzte 120 Sekunden</h2><canvas id=\"ramChart\"></canvas>\n"
+"<h2>HTTP-FIFO-Füllstand · letzte 120 Sekunden</h2><canvas id=\"fifoChart\"></canvas>\n"
+"<h2>Alter letzter HTTP-Daten · letzte 120 Sekunden</h2><canvas id=\"httpAgeChart\"></canvas>\n"
+"<p class=\"caption\">Bei einem HTTP-Read mit 4,5 Sekunden Dauer steigen die Wartezeit und das Alter der letzten Daten – das ist zunächst keine Aussage darüber, ob der Radioserver oder das WLAN verantwortlich war.</p>\n"
 "</section>\n"
 "<section>\n"
 "<h2>Störung markieren</h2>\n"
@@ -84,7 +102,7 @@ static const char LAB_PAGE[] =
 "</section>\n"
 "<section><h2>Zusatzdiagnose</h2>\n"
 "<div id=\"other\">Verbinde mit Gerät …</div>\n"
-"<p class=\"caption\">Die Software misst Aufrufzeiten, PCM-Puffer und Task-Reserven. Direkte DAC-Stille, RGB-DMA-Unterläufe und reale elektrische Versorgungsspannung werden hier nicht hardwareseitig gemessen.</p></section>\n"
+"<p class=\"caption\">Die Software erfasst Aufrufzeiten, WLAN, HTTP, PCM-Puffer und Task-Reserven. Direkte DAC-Stille, RGB-DMA-Unterläufe und reale Versorgungsspannung sind hier nicht hardwareseitig messbar. RSSI ist ein Empfangssignal-Indikator, kein Paketverlustzähler.</p></section>\n"
 "<script>\n"
 "const el=id=>document.getElementById(id);\n"
 "let initial=false;\n"
@@ -125,12 +143,27 @@ static const char LAB_PAGE[] =
 "  el('ram').textContent=kb(s.ram_free);\n"
 "  el('largest').textContent=kb(s.ram_largest);\n"
 "  el('stack').textContent=s.i2s_stack?kb(s.i2s_stack):'noch nicht erfasst';\n"
-"  el('rssi').textContent=s.rssi===null?'–':s.rssi+' dBm';\n"
-"  el('other').textContent='HTTP-Bytes: '+s.http_bytes+' · HTTP-FIFO: '+kb(s.fifo_bytes)+'/'+kb(s.fifo_capacity)+' · WLAN-Abbrüche: '+s.wifi_lost+' · Touch: '+s.touches+' · Markierungen: '+s.marks+' · Decoder max: '+s.decoder_max+' ms · I2S-Schreibaufrufe: '+s.i2s_calls+' · PCM+Touch-Leerläufe: '+s.touch_near_pcm;\n"
+"  el('rssi').textContent=s.wifi_connected?s.rssi+' dBm':'nicht verbunden';\n"
+"  el('wifiChannel').textContent=s.wifi_channel||'–';\n"
+"  el('wifiReason').textContent=s.wifi_last_reason||'–';\n"
+"  el('httpRead').textContent=s.http_inflight?(s.http_running+' ms (läuft)'):(s.http_last_read+' ms');\n"
+"  el('httpAge').textContent=s.http_age<0?'noch keine Daten':s.http_age+' ms';\n"
+"  el('httpSlow').textContent=s.http_gt_1000;\n"
+"  el('httpVerySlow').textContent=s.http_gt_4000;\n"
+"  el('httpConnect').textContent=s.http_connect_max+' ms';\n"
+"  el('httpStatus').textContent=s.http_status||'–';\n"
+"  el('fifoLevel').textContent=kb(s.fifo_bytes)+'/'+kb(s.fifo_capacity);\n"
+"  el('httpFull').textContent=(s.http_wait_full/1000).toFixed(1)+' s';\n"
+"  el('audioStack').textContent=s.audio_stack?kb(s.audio_stack):'–';\n"
+"  el('httpStack').textContent=s.http_stack?kb(s.http_stack):'–';\n"
+"  el('psram').textContent=kb(s.psram_free);\n"
+"  el('pcmLow').textContent=s.pcm_low;\n"
+"  el('clocks').textContent=s.cpu_mhz+'/'+s.psram_mhz+' MHz';\n"
+"  el('other').textContent='HTTP: '+s.http_reads+' Reads, '+s.http_bytes+' Bytes, '+s.http_zero+' x 0 Bytes, '+s.http_negative+' Fehler/EAGAIN, max '+s.http_max+' ms · HTTP ohne Daten maximal '+s.http_age_max+' ms · Verbindungsversuche '+s.http_connect_attempts+', Fehler '+s.http_connect_failures+', Redirects '+s.http_redirects+' · WLAN verbindet '+s.wifi_connects+' mal, Abbrüche '+s.wifi_lost+' · Decoder max '+s.decoder_max+' ms · Audio-FIFO-Unterläufe '+s.fifo_underruns+' · I2S-Calls '+s.i2s_calls+' · Touch '+s.touches+', Markierungen '+s.marks+' · Sample-Rate '+s.sample_rate+' Hz, Kanäle '+s.channels+' · LWIP-Status '+s.http_last_result;\n"
 "  if(!initial){el('mode').value=String(s.mode);el('prime').value=String(s.prime);el('ui').value=String(s.ui);el('primeValue').textContent=s.prime+' KB';initial=true;}\n"
 " }catch(e){el('other').textContent='Diagnose nicht erreichbar: '+e.message}\n"
 "}\n"
-"function draw(id,arr,selector,range){\n"
+"function draw(id,arr,selector,range,unit='KB'){\n"
 " const c=el(id),ctx=c.getContext('2d'),scale=window.devicePixelRatio||1;\n"
 " const w=c.clientWidth,h=170;c.width=w*scale;c.height=h*scale;ctx.scale(scale,scale);\n"
 " ctx.clearRect(0,0,w,h);\n"
@@ -144,7 +177,7 @@ static const char LAB_PAGE[] =
 "  if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);\n"
 " }\n"
 " ctx.stroke();\n"
-" ctx.fillStyle='#a5b7c3';ctx.font='12px system-ui';ctx.fillText((max/1024).toFixed(1)+' KB',5,13);ctx.fillText((min/1024).toFixed(1)+' KB',5,h-5);\n"
+" ctx.fillStyle='#a5b7c3';ctx.font='12px system-ui';const scaleValue=unit==='ms'?1:1024;ctx.fillText((max/scaleValue).toFixed(1)+' '+unit,5,13);ctx.fillText((min/scaleValue).toFixed(1)+' '+unit,5,h-5);\n"
 "}\n"
 "async function history(){\n"
 " try{\n"
@@ -152,10 +185,13 @@ static const char LAB_PAGE[] =
 "  const items=await r.json();\n"
 "  draw('pcmChart',items,x=>x.pcm,65536);\n"
 "  draw('ramChart',items,x=>x.ram,0);\n"
+"  draw('fifoChart',items,x=>x.fifo,32768);\n"
+"  draw('httpAgeChart',items,x=>Math.min(x.http_age<0?0:x.http_age,10000),10000,'ms');\n"
 " }catch(e){}\n"
 "}\n"
 "refresh();history();setInterval(refresh,1000);setInterval(history,3000);\n"
-"</script></body></html>\n";
+"</script></body></html>\n"
+"\n";
 
 static esp_err_t lab_home(httpd_req_t *req)
 {
@@ -168,42 +204,67 @@ static esp_err_t lab_state(httpd_req_t *req)
 {
     radio_diag_snapshot_t d;
     radio_diag_snapshot(&d);
-    wifi_ap_record_t ap = {0};
-    bool have_rssi = radio_wifi_connected() && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
-    char response[1152];
+    char response[3000];
+    int32_t http_age = d.last_http_ms ? (int32_t)(d.uptime_ms - d.last_http_ms) : -1;
+    uint32_t running_ms = d.http_inflight && d.http_read_started_ms ?
+                          d.uptime_ms - d.http_read_started_ms : 0;
     int n = snprintf(response, sizeof(response),
-        "{\"mode\":%d,\"prime\":%lu,\"ui\":%lu,\"pcm_bytes\":%lu,"
-        "\"pcm_capacity\":%lu,\"pcm_min\":%lu,\"pcm_max\":%lu,"
-        "\"pcm_underruns\":%lu,\"touch_near_pcm\":%lu,"
+        "{\"mode\":%d,\"prime\":%lu,\"ui\":%lu,"
+        "\"pcm_bytes\":%lu,\"pcm_capacity\":%lu,\"pcm_min\":%lu,\"pcm_max\":%lu,"
+        "\"pcm_underruns\":%lu,\"touch_near_pcm\":%lu,\"pcm_low\":%lu,"
         "\"i2s_errors\":%lu,\"i2s_calls\":%lu,\"i2s_stack\":%lu,"
-        "\"codec_max\":%lu,\"decoder_max\":%lu,"
-        "\"ram_free\":%lu,\"ram_largest\":%lu,"
-        "\"fifo_bytes\":%lu,\"fifo_capacity\":%lu,"
-        "\"wifi_lost\":%lu,\"touches\":%lu,\"marks\":%lu,"
-        "\"http_bytes\":%lu,\"rssi\":",
+        "\"codec_max\":%lu,\"decoder_max\":%lu,\"ram_free\":%lu,\"ram_largest\":%lu,"
+        "\"psram_free\":%lu,\"fifo_bytes\":%lu,\"fifo_capacity\":%lu,\"fifo_underruns\":%lu,"
+        "\"wifi_lost\":%lu,\"wifi_connects\":%lu,\"wifi_last_reason\":%lu,"
+        "\"wifi_connected\":%lu,\"wifi_channel\":%lu,\"rssi\":%ld,"
+        "\"touches\":%lu,\"marks\":%lu,"
+        "\"http_bytes\":%lu,\"http_reads\":%lu,\"http_last_read\":%lu,"
+        "\"http_last_result\":%ld,\"http_inflight\":%lu,\"http_running\":%lu,"
+        "\"http_max\":%lu,\"http_gt_1000\":%lu,\"http_gt_4000\":%lu,"
+        "\"http_zero\":%lu,\"http_negative\":%lu,\"http_age_max\":%lu,"
+        "\"http_age\":%ld,\"http_connect_max\":%lu,\"http_connect_attempts\":%lu,"
+        "\"http_connect_failures\":%lu,\"http_status\":%lu,\"http_redirects\":%lu,"
+        "\"http_wait_full\":%lu,\"audio_stack\":%lu,\"http_stack\":%lu,"
+        "\"sample_rate\":%lu,\"channels\":%lu,\"cpu_mhz\":%lu,\"psram_mhz\":%lu}",
         radio_lab_mode(), (unsigned long)radio_lab_prime_kb(),
         (unsigned long)radio_ui_interval_get(),
-        (unsigned long)d.pcm_bytes, (unsigned long)d.pcm_capacity,
-        (unsigned long)d.pcm_min_bytes, (unsigned long)d.pcm_max_bytes,
-        (unsigned long)d.pcm_underruns, (unsigned long)d.pcm_near_touch,
-        (unsigned long)d.i2s_write_errors, (unsigned long)d.i2s_write_calls,
+        (unsigned long)d.pcm_bytes,(unsigned long)d.pcm_capacity,
+        (unsigned long)d.pcm_min_bytes,(unsigned long)d.pcm_max_bytes,
+        (unsigned long)d.pcm_underruns,(unsigned long)d.pcm_near_touch,
+        (unsigned long)d.pcm_low_events,
+        (unsigned long)d.i2s_write_errors,(unsigned long)d.i2s_write_calls,
         (unsigned long)d.i2s_stack_min_bytes,
-        (unsigned long)d.codec_max_ms, (unsigned long)d.decoder_max_ms,
+        (unsigned long)d.codec_max_ms,(unsigned long)d.decoder_max_ms,
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-        (unsigned long)d.fifo_bytes, (unsigned long)d.fifo_capacity,
-        (unsigned long)d.wifi_disconnects, (unsigned long)d.touch_presses,
-        (unsigned long)d.marks, (unsigned long)d.http_bytes);
-    if (n < 0 || n >= (int)sizeof(response) - 24) {
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+        (unsigned long)d.fifo_bytes,(unsigned long)d.fifo_capacity,
+        (unsigned long)d.fifo_underruns,
+        (unsigned long)d.wifi_disconnects,(unsigned long)d.wifi_connects,
+        (unsigned long)d.wifi_last_reason,
+        (unsigned long)d.wifi_is_connected,(unsigned long)d.wifi_channel,
+        (long)d.wifi_rssi,
+        (unsigned long)d.touch_presses,(unsigned long)d.marks,
+        (unsigned long)d.http_bytes,(unsigned long)d.http_reads,
+        (unsigned long)d.http_last_read_ms,(long)d.http_last_result,
+        (unsigned long)d.http_inflight,(unsigned long)running_ms,
+        (unsigned long)d.http_max_ms,(unsigned long)d.http_read_gt_1000ms,
+        (unsigned long)d.http_read_gt_4000ms,
+        (unsigned long)d.http_zero_reads,(unsigned long)d.http_negative_reads,
+        (unsigned long)d.http_age_max_ms,(long)http_age,
+        (unsigned long)d.http_connect_max_ms,(unsigned long)d.http_connect_attempts,
+        (unsigned long)d.http_connect_failures,(unsigned long)d.http_status,
+        (unsigned long)d.http_redirects,(unsigned long)d.http_wait_full_ms,
+        (unsigned long)d.audio_stack_free,(unsigned long)d.http_stack_free,
+        (unsigned long)d.stream_sample_rate,(unsigned long)d.stream_channels,
+        (unsigned long)d.cpu_mhz_config,(unsigned long)d.psram_mhz_config);
+    if (n < 0 || n >= (int)sizeof(response)) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    if (have_rssi) snprintf(response + n, sizeof(response) - n,
-                           "%d}", (int)ap.rssi);
-    else snprintf(response + n, sizeof(response) - n, "null}");
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(req, response);
+    return httpd_resp_send(req, response, n);
 }
 
 static esp_err_t lab_history(httpd_req_t *req)
@@ -211,26 +272,29 @@ static esp_err_t lab_history(httpd_req_t *req)
     /* Return the time series in ONE response rather than 120 small writes.
      * Otherwise observing the lab would perturb the Wi-Fi/audio timing. */
     radio_diag_sample_t *items = heap_caps_malloc(
-        sizeof(radio_diag_sample_t) * RADIO_DIAG_SAMPLES,
+        sizeof(radio_diag_sample_t) * 120,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    char *response = heap_caps_malloc(16000, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *response = heap_caps_malloc(20000, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!items || !response) {
         heap_caps_free(items);
         heap_caps_free(response);
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    size_t count = radio_diag_history(items, RADIO_DIAG_SAMPLES);
-    const size_t capacity = 16000;
+    size_t count = radio_diag_history(items, 120);
+    const size_t capacity = 20000;
     size_t used = 0;
     response[used++] = '[';
     for (size_t i = 0; i < count; ++i) {
         int n = snprintf(response + used, capacity - used,
-             "%s{\"t\":%lu,\"pcm\":%lu,\"ram\":%lu,\"http\":%lu,\"under\":%lu,\"touch\":%lu}",
+             "%s{\"t\":%lu,\"pcm\":%lu,\"ram\":%lu,\"http\":%lu,\"fifo\":%lu,\"http_age\":%ld,\"rssi\":%d,\"under\":%lu,\"touch\":%lu}",
              i ? "," : "", (unsigned long)items[i].ms,
              (unsigned long)items[i].pcm_bytes,
              (unsigned long)items[i].internal_free,
              (unsigned long)items[i].http_bytes,
+             (unsigned long)items[i].fifo_bytes,
+             items[i].http_age_ms == UINT32_MAX ? -1L : (long)items[i].http_age_ms,
+             (int)items[i].wifi_rssi,
              (unsigned long)items[i].pcm_underruns,
              (unsigned long)items[i].touch_presses);
         if (n < 0 || (size_t)n >= capacity - used - 2) {
@@ -302,50 +366,86 @@ static esp_err_t lab_mark(httpd_req_t *req)
 
 static esp_err_t lab_csv(httpd_req_t *req)
 {
-    radio_diag_sample_t *items = heap_caps_malloc(
-        sizeof(radio_diag_sample_t) * RADIO_DIAG_SAMPLES,
+    radio_diag_sample_t *samples = heap_caps_malloc(
+        RADIO_DIAG_SAMPLES * sizeof(radio_diag_sample_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!items) { httpd_resp_send_500(req); return ESP_FAIL; }
-    size_t count = radio_diag_history(items, RADIO_DIAG_SAMPLES);
-    radio_diag_snapshot_t d;
-    radio_diag_snapshot(&d);
-
+    radio_diag_event_t *events = heap_caps_malloc(
+        RADIO_DIAG_EXT_EVENTS * sizeof(radio_diag_event_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *chunk = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!samples || !events || !chunk) {
+        heap_caps_free(samples);
+        heap_caps_free(events);
+        heap_caps_free(chunk);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t count = radio_diag_history(samples, RADIO_DIAG_SAMPLES);
+    size_t ev_count = radio_diag_extended_events(events, RADIO_DIAG_EXT_EVENTS);
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Disposition",
-                       "attachment; filename=kuechenradio65_diagnose.csv");
+                       "attachment; filename=kuechenradio66_diagnose.csv");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    esp_err_t err = httpd_resp_send_chunk(req,
-        "typ;zeit_ms;pcm_bytes;http_bytes;pcm_unterlaeufe;touch_anzahl;intern_frei_bytes;"
-        "ereignis;wert;zusatz;http_alter_ms;audio_alter_ms;lvgl_alter_ms\n",
-        HTTPD_RESP_USE_STRLEN);
-    char row[256];
+    const char *header =
+        "typ;zeit_ms;pcm_bytes;fifo_bytes;http_bytes;http_alter_ms;http_read_ms;"
+        "pcm_unterlaeufe;fifo_unterlaeufe;i2s_fehler;touch_anzahl;"
+        "intern_frei_bytes;intern_groesster_block;psram_frei_bytes;"
+        "wifi_rssi_dbm;wifi_kanal;wifi_verbunden;"
+        "audio_stack_frei;http_stack_frei;i2s_stack_frei;modus;"
+        "ereignis;wert;zusatz;event_pcm;event_fifo;event_http_alter_ms;"
+        "event_audio_alter_ms;event_lvgl_alter_ms\n";
+    esp_err_t err = httpd_resp_send_chunk(req, header, HTTPD_RESP_USE_STRLEN);
+    size_t used = 0;
+    char row[300];
     for (size_t i = 0; i < count && err == ESP_OK; ++i) {
+        const radio_diag_sample_t *s = &samples[i];
         int n = snprintf(row, sizeof(row),
-            "sample;%lu;%lu;%lu;%lu;%lu;%lu;;;;;;\n",
-            (unsigned long)items[i].ms,
-            (unsigned long)items[i].pcm_bytes,
-            (unsigned long)items[i].http_bytes,
-            (unsigned long)items[i].pcm_underruns,
-            (unsigned long)items[i].touch_presses,
-            (unsigned long)items[i].internal_free);
+            "sample;%lu;%lu;%lu;%lu;%ld;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu;"
+            "%d;%u;%u;%lu;%lu;%lu;%u;;;;;;;;\n",
+            (unsigned long)s->ms,(unsigned long)s->pcm_bytes,
+            (unsigned long)s->fifo_bytes,(unsigned long)s->http_bytes,
+            s->http_age_ms == UINT32_MAX ? -1L : (long)s->http_age_ms,
+            (unsigned long)s->http_last_read_ms,
+            (unsigned long)s->pcm_underruns,(unsigned long)s->fifo_underruns,
+            (unsigned long)s->i2s_errors,(unsigned long)s->touch_presses,
+            (unsigned long)s->internal_free,(unsigned long)s->internal_largest,
+            (unsigned long)s->psram_free,(int)s->wifi_rssi,
+            (unsigned)s->wifi_channel,(unsigned)s->wifi_connected,
+            (unsigned long)s->audio_stack_free,(unsigned long)s->http_stack_free,
+            (unsigned long)s->i2s_stack_free,(unsigned)s->mode);
         if (n < 0 || n >= (int)sizeof(row)) { err = ESP_FAIL; break; }
-        err = httpd_resp_send_chunk(req, row, n);
+        if (used + n >= 4096) {
+            err = httpd_resp_send_chunk(req, chunk, used);
+            used = 0;
+        }
+        if (err != ESP_OK) break;
+        memcpy(chunk + used, row, n);
+        used += n;
     }
-    for (size_t i = 0; i < d.event_count && err == ESP_OK; ++i) {
-        const radio_diag_event_t *e = &d.events[i];
+    for (size_t i = 0; i < ev_count && err == ESP_OK; ++i) {
+        const radio_diag_event_t *e = &events[i];
         int n = snprintf(row, sizeof(row),
-            "event;%lu;%lu;;;;;%s;%lu;%d;%ld;%ld;%ld\n",
-            (unsigned long)e->ms, (unsigned long)e->pcm_bytes,
-            radio_diag_name((radio_diag_kind_t)e->kind),
+            "event;%lu;;;;;;;;;;;;;;;;;;;;%s;%lu;%d;%lu;%lu;%ld;%ld;%ld\n",
+            (unsigned long)e->ms, radio_diag_name((radio_diag_kind_t)e->kind),
             (unsigned long)e->value, (int)e->aux,
+            (unsigned long)e->pcm_bytes,(unsigned long)e->fifo_bytes,
             e->network_age_ms == UINT32_MAX ? -1L : (long)e->network_age_ms,
             e->audio_age_ms == UINT32_MAX ? -1L : (long)e->audio_age_ms,
             e->ui_age_ms == UINT32_MAX ? -1L : (long)e->ui_age_ms);
         if (n < 0 || n >= (int)sizeof(row)) { err = ESP_FAIL; break; }
-        err = httpd_resp_send_chunk(req, row, n);
+        if (used + n >= 4096) {
+            err = httpd_resp_send_chunk(req, chunk, used);
+            used = 0;
+        }
+        if (err != ESP_OK) break;
+        memcpy(chunk + used, row, n);
+        used += n;
     }
+    if (err == ESP_OK && used) err = httpd_resp_send_chunk(req, chunk, used);
     if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
-    heap_caps_free(items);
+    heap_caps_free(samples);
+    heap_caps_free(events);
+    heap_caps_free(chunk);
     return err;
 }
 

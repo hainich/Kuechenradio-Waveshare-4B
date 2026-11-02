@@ -81,7 +81,7 @@ static esp_err_t home_get(httpd_req_t *req)
         ADD("\"></div>");
     }
     ADD("<button type='submit'>Speichern und neu starten</button></form>"
-        "<p><a style='color:#67e8f9' href='/lab'>Diagnoselabor #65 oeffnen</a></p>"
+        "<p><a style='color:#67e8f9' href='/lab'>Diagnoselabor #66 oeffnen</a></p>"
         "<p><a style='color:#67e8f9' href='/diagnose'>Textdiagnose ansehen</a></p>"
         "<small>Setup-WLAN: Kuechenradio-Setup / Passwort: Kuechenradio123. "
         "Einstellungen im Heimnetz ueber die IP-Adresse des Displays.</small></body></html>");
@@ -173,7 +173,7 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / Build #65 Messlabor\n");
+    REPORT("KUECHENRADIO DIAGNOSE / Firmware #66 Erweiterte Messungen\n");
     REPORT("Web-Diagnoselabor: http://<RADIO-IP>/lab | CSV: /lab/csv\n");
     REPORT("Modus: %d (0=Radio, 1=Testton direkt, 2=Testton PCM) | PCM-Start: %lu KB\n",
            radio_lab_mode(), (unsigned long)radio_lab_prime_kb());
@@ -212,19 +212,54 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     REPORT("WLAN-Abbrueche: %lu | Stream-Starts: %lu | Stream-Enden: %lu\n",
            (unsigned long)d.wifi_disconnects, (unsigned long)d.stream_starts,
            (unsigned long)d.stream_ends);
+    REPORT("\n--- 30-MINUTEN-DIAGNOSE (#66) ---\n");
+    REPORT("CPU-Takt konfiguriert %lu MHz | PSRAM-Takt konfiguriert %lu MHz | Audiomodus %d\n",
+           (unsigned long)d.cpu_mhz_config, (unsigned long)d.psram_mhz_config, radio_lab_mode());
+    REPORT("HTTP zuletzt %ld B (%lu ms) | inflight: %s (%lu ms) | ohne Daten seit %ld ms\n",
+           (long)d.http_last_result, (unsigned long)d.http_last_read_ms,
+           d.http_inflight ? "ja" : "nein",
+           (unsigned long)(d.http_inflight && d.http_read_started_ms ?
+                d.uptime_ms - d.http_read_started_ms : 0),
+           d.last_http_ms ? (long)(d.uptime_ms - d.last_http_ms) : -1L);
+    REPORT("HTTP langsam: >=100ms %lu, >=1000ms %lu, >=4000ms %lu | Null-Reads %lu | negative Reads %lu\n",
+           (unsigned long)d.http_read_gt_100ms, (unsigned long)d.http_read_gt_1000ms,
+           (unsigned long)d.http_read_gt_4000ms, (unsigned long)d.http_zero_reads,
+           (unsigned long)d.http_negative_reads);
+    REPORT("HTTP Verbindungen: %lu Versuche | %lu Fehler | letzte %lu ms | max %lu ms | Status %lu | Open-Fehler %ld | Redirects %lu\n",
+           (unsigned long)d.http_connect_attempts, (unsigned long)d.http_connect_failures,
+           (unsigned long)d.http_connect_last_ms, (unsigned long)d.http_connect_max_ms,
+           (unsigned long)d.http_status, (long)d.http_open_error,
+           (unsigned long)d.http_redirects);
+    REPORT("HTTP Puffer blockiert: %lu ms | %lu Wartezyklen | max Datenpause %lu ms\n",
+           (unsigned long)d.http_wait_full_ms, (unsigned long)d.http_backpressure_count,
+           (unsigned long)d.http_age_max_ms);
+    REPORT("WLAN RSSI %ld dBm | Kanal %lu | verbunden %s | Verbindungen %lu | letzter Abbruchcode %lu\n",
+           (long)d.wifi_rssi, (unsigned long)d.wifi_channel,
+           d.wifi_is_connected ? "ja" : "nein",
+           (unsigned long)d.wifi_connects, (unsigned long)d.wifi_last_reason);
+    REPORT("Stackreserven: Audio %lu B | HTTP %lu B | I2S %lu B | WLAN-Housekeeping %lu B\n",
+           (unsigned long)d.audio_stack_free, (unsigned long)d.http_stack_free,
+           (unsigned long)d.i2s_stack_min_bytes, (unsigned long)d.wifi_stack_free);
+    REPORT("Decoder %lu Aufrufe, insgesamt %lu ms | Codec %lu Writes, insgesamt %lu ms\n",
+           (unsigned long)d.decode_calls, (unsigned long)d.decoder_total_ms,
+           (unsigned long)d.codec_calls, (unsigned long)d.codec_total_ms);
+    REPORT("Audio: Sample-Rate %lu Hz | Kanale %lu | Senderindex %lu | PCM niedrig %lu-mal\n",
+           (unsigned long)d.stream_sample_rate, (unsigned long)d.stream_channels,
+           (unsigned long)d.stream_station, (unsigned long)d.pcm_low_events);
+    REPORT("CSV /lab/csv enthaelt bis zu 1800 Messpunkte und 320 Ereignisse, unabhaengig vom geoeffneten Browser.\n");
     REPORT("Letzte erfolgreiche Daten: HTTP %s%lu ms | Audio %s%lu ms | LVGL %s%lu ms\n",
            d.last_http_ms ? "" : "nie/", (unsigned long)(d.last_http_ms ? d.uptime_ms - d.last_http_ms : 0),
            d.last_audio_ms ? "" : "nie/", (unsigned long)(d.last_audio_ms ? d.uptime_ms - d.last_audio_ms : 0),
            d.last_ui_ms ? "" : "nie/", (unsigned long)(d.last_ui_ms ? d.uptime_ms - d.last_ui_ms : 0));
     REPORT("\nLetzte %lu Ereignisse (neueste zuerst). Alle Zeitangaben in ms seit Neustart.\n",
            (unsigned long)d.event_count);
-    REPORT("Zeit(ms)       Ereignis                Wert  Zusatz FIFO  HTTP-Alter Audio-Alter LVGL-Alter\n");
+    REPORT("Zeit(ms)       Ereignis                Wert  Zusatz  FIFO   PCM HTTP-Alter Audio-Alter LVGL-Alter\n");
     for (uint32_t i = 0; i < d.event_count; ++i) {
         const radio_diag_event_t *ev = &d.events[i];
-        REPORT("%10lu  %-24s %7lu %6d %5lu %10ld %11ld %10ld\n",
+        REPORT("%10lu  %-24s %7lu %6d %5lu %5lu %10ld %11ld %10ld\n",
                (unsigned long)ev->ms, radio_diag_name((radio_diag_kind_t)ev->kind),
                (unsigned long)ev->value, (int)ev->aux,
-               (unsigned long)ev->fifo_bytes,
+               (unsigned long)ev->fifo_bytes, (unsigned long)ev->pcm_bytes,
                ev->network_age_ms == UINT32_MAX ? -1L : (long)ev->network_age_ms,
                ev->audio_age_ms == UINT32_MAX ? -1L : (long)ev->audio_age_ms,
                ev->ui_age_ms == UINT32_MAX ? -1L : (long)ev->ui_age_ms);

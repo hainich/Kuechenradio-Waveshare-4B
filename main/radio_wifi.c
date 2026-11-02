@@ -33,6 +33,7 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         s_connected = false;
         const wifi_event_sta_disconnected_t *ev = (const wifi_event_sta_disconnected_t *)data;
         s_disconnect_reason = (unsigned)ev->reason;
+        radio_diag_wifi(false, -127, 0, s_disconnect_reason);
         radio_diag_note(RD_WIFI_LOST, s_disconnect_reason, 0);
         ESP_LOGW(TAG, "Heim-WLAN getrennt: reason=%u; neuer Verbindungsversuch", (unsigned)ev->reason);
         /* Reconnect in STA and APSTA mode; when credentials are wrong,
@@ -44,6 +45,7 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         snprintf(s_address, sizeof(s_address), IPSTR, IP2STR(&ev->ip_info.ip));
         s_connected = true;
         s_disconnect_reason = 0;
+        radio_diag_wifi(true, -127, 0, 0);
         radio_diag_note(RD_WIFI_OK, 0, 0);
         ESP_LOGI(TAG, "Verbunden, Einstellungen: http://%s", s_address);
     }
@@ -62,6 +64,12 @@ static void wifi_fallback_task(void *arg)
         /* Coalesce touch-driven UI saves using this already-existing low
          * priority task, rather than allocating another SRAM task stack. */
         radio_config_ui_persist_poll();
+        /* One radio-signal query per second; never in decoder/codec hot paths. */
+        wifi_ap_record_t ap_info = {0};
+        bool signal_ok = s_connected && esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+        radio_diag_wifi(s_connected, signal_ok ? ap_info.rssi : -127,
+                        signal_ok ? ap_info.primary : 0, s_disconnect_reason);
+        radio_diag_stack(2, (uint32_t)uxTaskGetStackHighWaterMark(NULL));
         radio_diag_sample();
         if (s_connected) {
             disconnected_seconds = 0;

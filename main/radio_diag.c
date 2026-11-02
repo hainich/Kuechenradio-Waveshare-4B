@@ -3,6 +3,9 @@
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "radio_ui.h"
+#include "radio_stream.h"
+#include "sdkconfig.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include <limits.h>
@@ -20,12 +23,29 @@ static uint32_t s_last_http_no_data_event_ms;
 static radio_diag_sample_t *s_samples;
 static size_t s_samples_count;
 static size_t s_samples_next;
+static radio_diag_event_t *s_extended;
+static size_t s_ext_count;
+static size_t s_ext_next;
+static uint32_t s_diag_last_backpressure_event;
+static uint32_t s_diag_last_age_event;
+static const char *TAG = "radio_diag";
 
 void radio_diag_init(void)
 {
     s_samples = heap_caps_calloc(RADIO_DIAG_SAMPLES,
                                  sizeof(radio_diag_sample_t),
                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_extended = heap_caps_calloc(RADIO_DIAG_EXT_EVENTS,
+                                  sizeof(radio_diag_event_t),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_samples || !s_extended)
+        ESP_LOGW(TAG, "PSRAM-Messverlauf teilweise nicht verfuegbar");
+#ifdef CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+    s_diag.cpu_mhz_config = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+#endif
+#ifdef CONFIG_SPIRAM_SPEED
+    s_diag.psram_mhz_config = CONFIG_SPIRAM_SPEED;
+#endif
 }
 static uint32_t ms_now(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint32_t age(uint32_t now, uint32_t then) {
@@ -58,6 +78,11 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
     ev->network_age_ms = age(now, s_diag.last_http_ms);
     ev->audio_age_ms = age(now, s_diag.last_audio_ms);
     ev->ui_age_ms = age(now, s_diag.last_ui_ms);
+    if (s_extended) {
+        s_extended[s_ext_next] = *ev;
+        s_ext_next = (s_ext_next + 1) % RADIO_DIAG_EXT_EVENTS;
+        if (s_ext_count < RADIO_DIAG_EXT_EVENTS) ++s_ext_count;
+    }
     s_next_event = (s_next_event + 1) % RADIO_DIAG_HISTORY;
     if (s_num_events < RADIO_DIAG_HISTORY) ++s_num_events;
 
@@ -76,6 +101,7 @@ void radio_diag_note(radio_diag_kind_t kind, uint32_t value, int aux)
     case RD_AUDIO_FIFO_PSRAM: s_diag.fifo_backend = 2; break;
     case RD_AUDIO_DIRECT: s_diag.fifo_backend = 0; break;
     case RD_USER_MARK: ++s_diag.marks; break;
+    case RD_PCM_LOW: ++s_diag.pcm_low_events; break;
     default: break;
     }
     taskEXIT_CRITICAL(&s_diag_lock);
@@ -86,6 +112,13 @@ void radio_diag_http_read(int result, uint32_t duration_ms)
     uint32_t now = ms_now();
     taskENTER_CRITICAL(&s_diag_lock);
     ++s_diag.http_reads;
+    s_diag.http_last_read_ms = duration_ms;
+    s_diag.http_last_result = result;
+    if (duration_ms >= 100) ++s_diag.http_read_gt_100ms;
+    if (duration_ms >= 1000) ++s_diag.http_read_gt_1000ms;
+    if (duration_ms >= 4000) ++s_diag.http_read_gt_4000ms;
+    if (result == 0) ++s_diag.http_zero_reads;
+    if (result < 0) ++s_diag.http_negative_reads;
     if (duration_ms > s_diag.http_max_ms) s_diag.http_max_ms = duration_ms;
     if (result > 0) {
         s_diag.http_bytes += (uint32_t)result;
@@ -102,6 +135,8 @@ void radio_diag_http_read(int result, uint32_t duration_ms)
 void radio_diag_decode(uint32_t duration_ms)
 {
     taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.decode_calls;
+    s_diag.decoder_total_ms += duration_ms;
     if (duration_ms > s_diag.decoder_max_ms) s_diag.decoder_max_ms = duration_ms;
     taskEXIT_CRITICAL(&s_diag_lock);
     if (duration_ms >= 100) radio_diag_note(RD_DECODER_SLOW, duration_ms, 0);
@@ -110,6 +145,8 @@ void radio_diag_decode(uint32_t duration_ms)
 void radio_diag_codec(uint32_t duration_ms)
 {
     taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.codec_calls;
+    s_diag.codec_total_ms += duration_ms;
     if (duration_ms > s_diag.codec_max_ms) s_diag.codec_max_ms = duration_ms;
     taskEXIT_CRITICAL(&s_diag_lock);
     if (duration_ms >= 150) radio_diag_note(RD_CODEC_SLOW, duration_ms, 0);
@@ -194,6 +231,12 @@ const char *radio_diag_name(radio_diag_kind_t kind)
     case RD_TOUCH_PRESS: return "TOUCH_PRESSED";
     case RD_USER_MARK: return "USER_HEARD_GLITCH";
     case RD_I2S_WRITE_ERROR: return "I2S_WRITE_ERROR";
+    case RD_HTTP_CONNECT: return "HTTP_CONNECT";
+    case RD_HTTP_STATUS: return "HTTP_RESPONSE_ERROR";
+    case RD_HTTP_BACKPRESSURE: return "HTTP_FIFO_FULL_WAIT";
+    case RD_STREAM_FORMAT: return "STREAM_FORMAT";
+    case RD_PCM_LOW: return "PCM_LOW_LEVEL";
+    case RD_HTTP_GAP: return "HTTP_NO_PAYLOAD_STREAK";
     default: return "UNKNOWN";
     }
 }
@@ -266,28 +309,159 @@ void radio_diag_sample(void)
 {
     if (!s_samples) return;
     uint32_t free_internal = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t largest_internal = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t free_psram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint32_t now = ms_now();
+    bool report_http_gap = false;
+    uint32_t gap_value = 0;
     taskENTER_CRITICAL(&s_diag_lock);
     radio_diag_sample_t *s = &s_samples[s_samples_next];
     s->ms = now;
     s->pcm_bytes = s_diag.pcm_bytes;
+    s->fifo_bytes = s_diag.fifo_bytes;
     s->http_bytes = s_diag.http_bytes;
+    s->http_age_ms = age(now, s_diag.last_http_ms);
+    s->http_last_read_ms = s_diag.http_last_read_ms;
     s->pcm_underruns = s_diag.pcm_underruns;
+    s->fifo_underruns = s_diag.fifo_underruns;
+    s->i2s_errors = s_diag.i2s_write_errors;
     s->touch_presses = s_diag.touch_presses;
     s->internal_free = free_internal;
+    s->internal_largest = largest_internal;
+    s->psram_free = free_psram;
+    s->audio_stack_free = s_diag.audio_stack_free;
+    s->http_stack_free = s_diag.http_stack_free;
+    s->i2s_stack_free = s_diag.i2s_stack_min_bytes;
+    s->wifi_rssi = (int16_t)s_diag.wifi_rssi;
+    s->wifi_channel = (uint8_t)s_diag.wifi_channel;
+    s->wifi_connected = (uint8_t)s_diag.wifi_is_connected;
+    s->mode = (uint16_t)radio_lab_mode();
     s_samples_next = (s_samples_next + 1) % RADIO_DIAG_SAMPLES;
     if (s_samples_count < RADIO_DIAG_SAMPLES) ++s_samples_count;
+    /* A missing HTTP payload is only meaningful while actively streaming.
+     * The audio pipeline can intentionally be paused in lab modes. */
+    uint32_t http_age_ms = age(now, s_diag.last_http_ms);
+    if (radio_lab_mode() == RADIO_LAB_RADIO && s_diag.stream_starts > s_diag.stream_ends &&
+        http_age_ms != UINT32_MAX && http_age_ms >= 1500 &&
+        now - s_diag_last_age_event >= 1500) {
+        s_diag_last_age_event = now;
+        if (http_age_ms > s_diag.http_age_max_ms) s_diag.http_age_max_ms = http_age_ms;
+        gap_value = http_age_ms;
+        report_http_gap = true;
+    }
     taskEXIT_CRITICAL(&s_diag_lock);
+    if (report_http_gap) radio_diag_note(RD_HTTP_GAP, gap_value, 0);
 }
 
 size_t radio_diag_history(radio_diag_sample_t *out, size_t capacity)
 {
-    if (!out || capacity == 0 || !s_samples) return 0;
+    if (!out || !capacity || !s_samples) return 0;
+    size_t total, start;
     taskENTER_CRITICAL(&s_diag_lock);
-    size_t n = s_samples_count < capacity ? s_samples_count : capacity;
-    size_t start = (s_samples_next + RADIO_DIAG_SAMPLES - n) % RADIO_DIAG_SAMPLES;
-    for (size_t i = 0; i < n; ++i)
-        out[i] = s_samples[(start + i) % RADIO_DIAG_SAMPLES];
+    total = s_samples_count < capacity ? s_samples_count : capacity;
+    start = (s_samples_next + RADIO_DIAG_SAMPLES - total) % RADIO_DIAG_SAMPLES;
     taskEXIT_CRITICAL(&s_diag_lock);
-    return n;
+    /* Short fixed-size critical sections so HTTP and I2S counters are not
+     * blocked while exporting a 30-minute record from PSRAM. */
+    for (size_t i = 0; i < total; i += 12) {
+        size_t len = (total-i < 12) ? (total-i) : 12;
+        taskENTER_CRITICAL(&s_diag_lock);
+        for (size_t j = 0; j < len; ++j)
+            out[i+j] = s_samples[(start + i+j) % RADIO_DIAG_SAMPLES];
+        taskEXIT_CRITICAL(&s_diag_lock);
+    }
+    return total;
+}
+
+size_t radio_diag_extended_events(radio_diag_event_t *out, size_t capacity)
+{
+    if (!out || !capacity || !s_extended) return 0;
+    size_t count, start;
+    taskENTER_CRITICAL(&s_diag_lock);
+    count = s_ext_count < capacity ? s_ext_count : capacity;
+    start = (s_ext_next + RADIO_DIAG_EXT_EVENTS - count) % RADIO_DIAG_EXT_EVENTS;
+    taskEXIT_CRITICAL(&s_diag_lock);
+    for (size_t i=0; i<count; i+=12) {
+        size_t len = count-i < 12 ? count-i : 12;
+        taskENTER_CRITICAL(&s_diag_lock);
+        for (size_t j=0;j<len;j++)
+            out[i+j] = s_extended[(start+i+j) % RADIO_DIAG_EXT_EVENTS];
+        taskEXIT_CRITICAL(&s_diag_lock);
+    }
+    return count;
+}
+
+void radio_diag_http_inflight(bool busy)
+{
+    taskENTER_CRITICAL(&s_diag_lock);
+    s_diag.http_inflight = busy ? 1 : 0;
+    s_diag.http_read_started_ms = busy ? ms_now() : 0;
+    taskEXIT_CRITICAL(&s_diag_lock);
+}
+
+void radio_diag_http_open(int32_t error, int status, uint32_t elapsed_ms, bool redirect)
+{
+    taskENTER_CRITICAL(&s_diag_lock);
+    ++s_diag.http_connect_attempts;
+    s_diag.http_open_error = error;
+    s_diag.http_status = status > 0 ? (uint32_t)status : 0;
+    s_diag.http_connect_last_ms = elapsed_ms;
+    if (elapsed_ms > s_diag.http_connect_max_ms) s_diag.http_connect_max_ms = elapsed_ms;
+    if (error != 0 || (status > 0 && status != 200 && !redirect)) ++s_diag.http_connect_failures;
+    if (redirect) ++s_diag.http_redirects;
+    taskEXIT_CRITICAL(&s_diag_lock);
+    radio_diag_note(error || (status != 200 && !redirect) ? RD_HTTP_STATUS : RD_HTTP_CONNECT,
+                    elapsed_ms, error ? (int)error : status);
+}
+
+void radio_diag_http_backpressure(uint32_t ms)
+{
+    uint32_t now = ms_now();
+    bool emit = false;
+    taskENTER_CRITICAL(&s_diag_lock);
+    s_diag.http_wait_full_ms += ms;
+    ++s_diag.http_backpressure_count;
+    if (now - s_diag_last_backpressure_event >= 60000) {
+        emit = true;
+        s_diag_last_backpressure_event = now;
+    }
+    taskEXIT_CRITICAL(&s_diag_lock);
+    if (emit) radio_diag_note(RD_HTTP_BACKPRESSURE, ms, 0);
+}
+
+void radio_diag_wifi(bool connected, int rssi, uint8_t channel, uint32_t reason)
+{
+    taskENTER_CRITICAL(&s_diag_lock);
+    if (s_diag.wifi_is_connected != (uint32_t)connected) {
+        s_diag.wifi_last_change_ms = ms_now();
+        if (connected) ++s_diag.wifi_connects;
+    }
+    s_diag.wifi_is_connected = connected ? 1 : 0;
+    s_diag.wifi_rssi = connected ? rssi : -127;
+    s_diag.wifi_channel = connected ? channel : 0;
+    if (reason) s_diag.wifi_last_reason = reason;
+    taskEXIT_CRITICAL(&s_diag_lock);
+}
+
+void radio_diag_stack(uint32_t task, uint32_t remaining)
+{
+    taskENTER_CRITICAL(&s_diag_lock);
+    uint32_t *target = task == 0 ? &s_diag.audio_stack_free :
+                       task == 1 ? &s_diag.http_stack_free :
+                       &s_diag.wifi_stack_free;
+    if (*target == 0 || remaining < *target) *target = remaining;
+    taskEXIT_CRITICAL(&s_diag_lock);
+}
+
+void radio_diag_stream_format(uint32_t sample_rate, uint32_t channels, uint32_t station)
+{
+    bool changed;
+    taskENTER_CRITICAL(&s_diag_lock);
+    changed = s_diag.stream_sample_rate != sample_rate ||
+              s_diag.stream_channels != channels;
+    s_diag.stream_sample_rate = sample_rate;
+    s_diag.stream_channels = channels;
+    s_diag.stream_station = station;
+    taskEXIT_CRITICAL(&s_diag_lock);
+    if (changed) radio_diag_note(RD_STREAM_FORMAT, sample_rate, (int)channels);
 }
