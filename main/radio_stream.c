@@ -44,6 +44,14 @@
 #define RADIO_AUDIO_CORE 0
 #define RADIO_AUDIO_PRIORITY 4
 #define RADIO_HTTP_PRIORITY 5
+/* Decoded-PCM jitter buffer between decoder and I2S (mono, 16 bit). It lives
+ * in PSRAM and decouples decoder/LVGL/PSRAM stalls from the I2S DMA: 65536 B
+ * are about 740 ms at 44.1 kHz. A dedicated writer task, one priority above
+ * the HTTP task, is the only caller of esp_codec_dev_write(). */
+#define PCM_RING_BYTES 65536
+#define PCM_PRIME_BYTES 24576
+#define PCM_WRITE_CHUNK 1024
+#define RADIO_I2S_PRIORITY 6
 
 static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
@@ -270,6 +278,101 @@ static void http_receiver_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ---- PCM sink: decoder -> ring (PSRAM) -> writer task -> ES8311/I2S ---- */
+typedef struct {
+    audio_ring_t ring;
+    SemaphoreHandle_t mu;        /* protects ring only; short copies */
+    SemaphoreHandle_t codec_mu;  /* serialises every esp_codec_dev_* call */
+    SemaphoreHandle_t finished;
+    uint8_t *storage;
+    atomic_bool stop;
+    atomic_bool codec_open;
+    atomic_bool flushing;        /* play out a partial ring (rate change) */
+    atomic_bool failed;
+    atomic_uint underruns;
+    bool task_started;
+} pcm_sink_t;
+
+static size_t sink_used(pcm_sink_t *sink)
+{
+    xSemaphoreTake(sink->mu, portMAX_DELAY);
+    size_t used = audio_ring_available(&sink->ring);
+    xSemaphoreGive(sink->mu);
+    return used;
+}
+
+static void pcm_writer_task(void *arg)
+{
+    pcm_sink_t *sink = (pcm_sink_t *)arg;
+    uint8_t chunk[PCM_WRITE_CHUNK];
+    bool primed = false;
+    while (!atomic_load(&sink->stop)) {
+        size_t used = sink_used(sink);
+        if (!primed) {
+            if (used >= PCM_PRIME_BYTES || (used > 0 && atomic_load(&sink->flushing))) {
+                primed = true;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(5));
+                continue;
+            }
+        }
+        if (used == 0) {
+            /* Real PCM underrun: wait until the ring is primed again. */
+            primed = false;
+            atomic_fetch_add(&sink->underruns, 1);
+            radio_diag_note(RD_AUDIO_GAP, 0, 1);
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+        xSemaphoreTake(sink->mu, portMAX_DELAY);
+        size_t n = audio_ring_read(&sink->ring, chunk, sizeof(chunk));
+        xSemaphoreGive(sink->mu);
+        if (!n) continue;
+        xSemaphoreTake(sink->codec_mu, portMAX_DELAY);
+        if (atomic_load(&sink->codec_open)) {
+            int64_t t0 = esp_timer_get_time();
+            int rc = esp_codec_dev_write(s_speaker, chunk, (int)n);
+            radio_diag_codec((uint32_t)((esp_timer_get_time() - t0) / 1000));
+            if (rc != ESP_CODEC_DEV_OK) atomic_store(&sink->failed, true);
+            else radio_diag_audio_written();
+        }
+        xSemaphoreGive(sink->codec_mu);
+    }
+    xSemaphoreGive(sink->finished);
+    vTaskDelete(NULL);
+}
+
+/* Blocks while the ring is full: the decoder is paced by the writer. */
+static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len, uint32_t revision)
+{
+    while (len) {
+        if (!wanted(revision) || atomic_load(&sink->failed)) return false;
+        xSemaphoreTake(sink->mu, portMAX_DELAY);
+        size_t w = audio_ring_write(&sink->ring, data, len);
+        xSemaphoreGive(sink->mu);
+        if (!w) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+        data += w;
+        len -= w;
+    }
+    return true;
+}
+
+/* Play out everything queued (needed before changing the sample rate). */
+static void sink_drain(pcm_sink_t *sink, uint32_t revision)
+{
+    atomic_store(&sink->flushing, true);
+    for (int i = 0; i < 400 && wanted(revision) && !atomic_load(&sink->failed) &&
+                    sink_used(sink) > 0; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    xSemaphoreTake(sink->codec_mu, portMAX_DELAY); /* waits for in-flight write */
+    xSemaphoreGive(sink->codec_mu);
+    atomic_store(&sink->flushing, false);
+}
+
 static void play_stream(const char *url, uint32_t revision)
 {
     esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
@@ -291,6 +394,7 @@ static void play_stream(const char *url, uint32_t revision)
     uint32_t pcm_capacity = AUDIO_PCM_CAPACITY;
     esp_audio_simple_dec_handle_t decoder = NULL;
     audio_pipe_t pipe = { .http = http, .revision = revision };
+    pcm_sink_t sink = {0};
     uint8_t *fifo_storage = NULL;
     bool receiver_started = false;
     bool opened = false;
@@ -300,9 +404,19 @@ static void play_stream(const char *url, uint32_t revision)
 
     atomic_init(&pipe.stop, false);
     atomic_init(&pipe.eof, false);
+    atomic_init(&sink.stop, false);
+    atomic_init(&sink.codec_open, false);
+    atomic_init(&sink.flushing, false);
+    atomic_init(&sink.failed, false);
+    atomic_init(&sink.underruns, 0);
     pipe.mu = xSemaphoreCreateMutex();
     pipe.finished = xSemaphoreCreateBinary();
-    if (!encoded || !pcm || !pipe.mu || !pipe.finished) {
+    sink.mu = xSemaphoreCreateMutex();
+    sink.codec_mu = xSemaphoreCreateMutex();
+    sink.finished = xSemaphoreCreateBinary();
+    sink.storage = heap_caps_malloc(PCM_RING_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!encoded || !pcm || !pipe.mu || !pipe.finished ||
+        !sink.mu || !sink.codec_mu || !sink.finished || !sink.storage) {
         ESP_LOGE(TAG, "Audio-Workbuffers: encoded=%p PCM=%p, PSRAM free=%u",
                  (void *)encoded, (void *)pcm,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -323,6 +437,16 @@ static void play_stream(const char *url, uint32_t revision)
         goto done;
     }
 
+    audio_ring_init(&sink.ring, sink.storage, PCM_RING_BYTES);
+    if (xTaskCreatePinnedToCore(pcm_writer_task, "radio_i2s", 4096, &sink,
+                                RADIO_I2S_PRIORITY, NULL, RADIO_AUDIO_CORE) != pdPASS) {
+        status_set("Zu wenig RAM fuer Audio");
+        goto done;
+    }
+    sink.task_started = true;
+    ESP_LOGI(TAG, "PCM-Puffer %u B (PSRAM), I2S-Writer-Task prio %d",
+             (unsigned)PCM_RING_BYTES, RADIO_I2S_PRIORITY);
+
     /* Give the HTTP task and its stack first claim on scarce INTERNAL RAM.
      * The PCM workspace above is in PSRAM. The original code
      * allocated both as malloc(16384), then rejected all FIFO choices if
@@ -334,50 +458,29 @@ static void play_stream(const char *url, uint32_t revision)
      * Prefer a moderate SRAM FIFO.  If SRAM fragmentation still prevents
      * that, a 24-KiB PSRAM FIFO is safer than *no* independent HTTP task.
      * Direct-HTTP path remains a final recovery fallback only. */
-    const size_t fifo_sizes[] = {16384, 12288, 8192, 4096};
-    const size_t psram_fifo_sizes[] = {24576, 16384, 8192};
+    /* The compressed FIFO needs no internal-RAM guarantee any more: the PCM
+     * ring in front of the I2S absorbs PSRAM latency. Keeping it out of
+     * internal SRAM frees 16 KiB+ for Wi-Fi, lwIP and the RGB bounce buffers. */
+    const size_t psram_fifo_sizes[] = {32768, 24576, 16384, 8192};
     ESP_LOGI(TAG, "Before FIFO: internal free=%u largest=%u, PSRAM free=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    for (size_t i = 0; i < sizeof(fifo_sizes) / sizeof(fifo_sizes[0]); ++i) {
-        size_t capacity = fifo_sizes[i];
-        fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    for (size_t i = 0; i < sizeof(psram_fifo_sizes) / sizeof(psram_fifo_sizes[0]); ++i) {
+        size_t capacity = psram_fifo_sizes[i];
+        fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!fifo_storage) continue;
         audio_ring_init(&pipe.ring, fifo_storage, capacity);
         if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
                                     &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
             receiver_started = true;
             radio_diag_fifo(0, (uint32_t)capacity);
-            radio_diag_note(RD_AUDIO_FIFO_INTERNAL, (uint32_t)capacity, 0);
-            ESP_LOGI(TAG, "HTTP task ACTIVE, internal SRAM audio FIFO: %u B",
-                     (unsigned)capacity);
+            radio_diag_note(RD_AUDIO_FIFO_PSRAM, (uint32_t)capacity, 0);
+            ESP_LOGI(TAG, "HTTP task ACTIVE, PSRAM audio FIFO: %u B", (unsigned)capacity);
             break;
         }
         heap_caps_free(fifo_storage);
         fifo_storage = NULL;
-    }
-    if (!receiver_started) {
-        /* Only fallback to PSRAM when the internal ring+HTTP stack cannot
-         * both be allocated. The compressed data rate is far below the
-         * 480x480 RGB scanout bandwidth. Keep this FIFO modest. */
-        for (size_t i = 0; i < sizeof(psram_fifo_sizes) / sizeof(psram_fifo_sizes[0]); ++i) {
-            size_t capacity = psram_fifo_sizes[i];
-            fifo_storage = heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!fifo_storage) continue;
-            audio_ring_init(&pipe.ring, fifo_storage, capacity);
-            if (xTaskCreatePinnedToCore(http_receiver_task, "radio_http", 8192,
-                                        &pipe, RADIO_HTTP_PRIORITY, NULL, RADIO_AUDIO_CORE) == pdPASS) {
-                receiver_started = true;
-                radio_diag_fifo(0, (uint32_t)capacity);
-                radio_diag_note(RD_AUDIO_FIFO_PSRAM, (uint32_t)capacity, 0);
-                ESP_LOGW(TAG, "HTTP task ACTIVE, PSRAM fallback audio FIFO: %u B",
-                         (unsigned)capacity);
-                break;
-            }
-            heap_caps_free(fifo_storage);
-            fifo_storage = NULL;
-        }
     }
     if (!receiver_started) {
         radio_diag_fifo(0, 0);
@@ -494,7 +597,11 @@ static void play_stream(const char *url, uint32_t revision)
                 size_t samples = out.decoded_size / (info.channel * sizeof(int16_t));
                 if (!opened || active_rate != (int)info.sample_rate) {
                     if (opened) {
+                        sink_drain(&sink, revision);
+                        xSemaphoreTake(sink.codec_mu, portMAX_DELAY);
+                        atomic_store(&sink.codec_open, false);
                         esp_codec_dev_close(s_speaker);
+                        xSemaphoreGive(sink.codec_mu);
                         opened = false;
                     }
                     esp_codec_dev_sample_info_t fmt = {
@@ -502,7 +609,11 @@ static void play_stream(const char *url, uint32_t revision)
                         .channel = 1,
                         .bits_per_sample = 16,
                     };
-                    if (esp_codec_dev_open(s_speaker, &fmt) != ESP_CODEC_DEV_OK) {
+                    xSemaphoreTake(sink.codec_mu, portMAX_DELAY);
+                    int open_rc = esp_codec_dev_open(s_speaker, &fmt);
+                    if (open_rc == ESP_CODEC_DEV_OK) atomic_store(&sink.codec_open, true);
+                    xSemaphoreGive(sink.codec_mu);
+                    if (open_rc != ESP_CODEC_DEV_OK) {
                         ESP_LOGE(TAG, "ES8311 cannot open %u Hz", info.sample_rate);
                         status_set("ES8311 Audiofehler");
                         goto done;
@@ -513,7 +624,9 @@ static void play_stream(const char *url, uint32_t revision)
                 }
                 uint8_t volume = radio_config_get_volume();
                 if (volume_applied != (int)volume) {
+                    xSemaphoreTake(sink.codec_mu, portMAX_DELAY);
                     esp_codec_dev_set_out_vol(s_speaker, volume);
+                    xSemaphoreGive(sink.codec_mu);
                     volume_applied = (int)volume;
                 }
                 /* In-place fold is safe: destination i always precedes both
@@ -525,15 +638,10 @@ static void play_stream(const char *url, uint32_t revision)
                                              (int32_t)frame[i * 2 + 1]) / 2);
                     }
                 }
-                int64_t codec_started = esp_timer_get_time();
-                int codec_result = esp_codec_dev_write(s_speaker, pcm,
-                                        (int)(samples * sizeof(int16_t)));
-                radio_diag_codec((uint32_t)((esp_timer_get_time() - codec_started) / 1000));
-                if (codec_result != ESP_CODEC_DEV_OK) {
-                    status_set("Audioausgabe fehlgeschlagen");
+                if (!sink_push(&sink, pcm, samples * sizeof(int16_t), revision)) {
+                    if (atomic_load(&sink.failed)) status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
-                radio_diag_audio_written();
                 if (buffering) {
                     status_set("Spielt");
                     buffering = false;
@@ -560,11 +668,22 @@ done:
         xSemaphoreTake(pipe.finished, portMAX_DELAY);
         ESP_LOGI(TAG, "Audiopuffer-Unterlaeufe: %u", underruns);
     }
+    ESP_LOGI(TAG, "Audiotask stack high-water: %u B free",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    if (sink.task_started) {
+        atomic_store(&sink.stop, true);
+        xSemaphoreTake(sink.finished, portMAX_DELAY);
+        ESP_LOGI(TAG, "PCM-Unterlaeufe: %u", (unsigned)atomic_load(&sink.underruns));
+    }
     if (opened) esp_codec_dev_close(s_speaker);
     if (decoder) esp_audio_simple_dec_close(decoder);
     esp_http_client_cleanup(http);
     if (pipe.finished) vSemaphoreDelete(pipe.finished);
     if (pipe.mu) vSemaphoreDelete(pipe.mu);
+    if (sink.finished) vSemaphoreDelete(sink.finished);
+    if (sink.codec_mu) vSemaphoreDelete(sink.codec_mu);
+    if (sink.mu) vSemaphoreDelete(sink.mu);
+    heap_caps_free(sink.storage);
     heap_caps_free(fifo_storage);
     free(encoded);
     heap_caps_free(pcm);
