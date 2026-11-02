@@ -17,7 +17,7 @@
 static const char LAB_PAGE[] =
 "<!doctype html>\n"
 "<html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-"<title>Küchenradio · Diagnose #67</title>\n"
+"<title>Küchenradio · Diagnose #68</title>\n"
 "<style>\n"
 ":root{font-family:system-ui,sans-serif;color-scheme:dark;background:#0b1422;color:#e5edf5}\n"
 "body{max-width:860px;margin:auto;padding:12px}\n"
@@ -33,7 +33,7 @@ static const char LAB_PAGE[] =
 "select{width:100%}canvas{display:block;width:100%;height:145px;background:#07131f;margin:10px 0}\n"
 "#message{min-height:22px;border-left:3px solid #2dd4bf;padding:6px 10px;color:#c8eef0}\n"
 "</style></head><body>\n"
-"<h1>Küchenradio · Diagnose #67</h1>\n"
+"<h1>Küchenradio · Diagnose #68</h1>\n"
 "<p><a href=\"/\">Sendereinstellungen</a> · <a href=\"/lab/csv\">30-Minuten-Protokoll (CSV)</a> · <a href=\"/diagnose\">Textbericht</a></p>\n"
 "<section>\n"
 "<h2>Störung unmittelbar markieren</h2>\n"
