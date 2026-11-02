@@ -27,6 +27,7 @@ static bool s_playing = true;
 static uint32_t s_last_rev;
 static atomic_uint s_ui_interval_ms = ATOMIC_VAR_INIT(1000);
 static lv_timer_t *s_refresh_timer;
+static uint32_t s_applied_interval_ms = 1000;
 
 bool radio_ui_interval_set(uint32_t ms)
 {
@@ -89,8 +90,10 @@ static void refresh(lv_timer_t *timer)
     (void)timer;
     radio_diag_ui_tick();
     uint32_t wanted_ms = radio_ui_interval_get();
-    if (s_refresh_timer && lv_timer_get_period(s_refresh_timer) != wanted_ms)
+    if (s_refresh_timer && s_applied_interval_ms != wanted_ms) {
         lv_timer_set_period(s_refresh_timer, wanted_ms);
+        s_applied_interval_ms = wanted_ms;
+    }
     radio_settings_t cfg;
     radio_config_get(&cfg);
     if (s_last_rev != radio_config_revision()) {
