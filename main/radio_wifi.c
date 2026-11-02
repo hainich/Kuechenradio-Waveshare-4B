@@ -62,6 +62,7 @@ static void wifi_fallback_task(void *arg)
         /* Coalesce touch-driven UI saves using this already-existing low
          * priority task, rather than allocating another SRAM task stack. */
         radio_config_ui_persist_poll();
+        radio_diag_sample();
         if (s_connected) {
             disconnected_seconds = 0;
         } else if (s_home_configured && !s_setup_ap_active) {

@@ -57,6 +57,23 @@ static const char *TAG = "radio_stream";
 static esp_codec_dev_handle_t s_speaker;
 static SemaphoreHandle_t s_status_mu;
 static char s_status[72] = "Starte ...";
+static atomic_int s_lab_mode = ATOMIC_VAR_INIT(RADIO_LAB_RADIO);
+static atomic_uint s_lab_prime_kb = ATOMIC_VAR_INIT(24);
+
+int radio_lab_mode(void) { return atomic_load(&s_lab_mode); }
+bool radio_lab_set_mode(int mode)
+{
+    if (mode < RADIO_LAB_RADIO || mode > RADIO_LAB_PCM_TONE) return false;
+    atomic_store(&s_lab_mode, mode);
+    return true;
+}
+uint32_t radio_lab_prime_kb(void) { return atomic_load(&s_lab_prime_kb); }
+bool radio_lab_set_prime_kb(uint32_t kb)
+{
+    if (kb < 8 || kb > 48 || kb % 4) return false;
+    atomic_store(&s_lab_prime_kb, kb);
+    return true;
+}
 
 static void status_set(const char *str)
 {
@@ -174,7 +191,8 @@ static esp_http_client_handle_t open_stream(const char *url, esp_audio_simple_de
 
 static bool wanted(uint32_t revision)
 {
-    return radio_wifi_connected() && radio_config_revision() == revision;
+    return radio_lab_mode() == RADIO_LAB_RADIO &&
+           radio_wifi_connected() && radio_config_revision() == revision;
 }
 
 /*
@@ -306,10 +324,11 @@ static void pcm_writer_task(void *arg)
     pcm_sink_t *sink = (pcm_sink_t *)arg;
     uint8_t chunk[PCM_WRITE_CHUNK];
     bool primed = false;
+    uint32_t writer_calls = 0;
     while (!atomic_load(&sink->stop)) {
         size_t used = sink_used(sink);
         if (!primed) {
-            if (used >= PCM_PRIME_BYTES || (used > 0 && atomic_load(&sink->flushing))) {
+            if (used >= radio_lab_prime_kb() * 1024 || (used > 0 && atomic_load(&sink->flushing))) {
                 primed = true;
             } else {
                 vTaskDelay(pdMS_TO_TICKS(5));
@@ -320,12 +339,14 @@ static void pcm_writer_task(void *arg)
             /* Real PCM underrun: wait until the ring is primed again. */
             primed = false;
             atomic_fetch_add(&sink->underruns, 1);
-            radio_diag_note(RD_AUDIO_GAP, 0, 1);
+            radio_diag_pcm_underrun();
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
         xSemaphoreTake(sink->mu, portMAX_DELAY);
         size_t n = audio_ring_read(&sink->ring, chunk, sizeof(chunk));
+        radio_diag_pcm((uint32_t)audio_ring_available(&sink->ring),
+                       (uint32_t)sink->ring.capacity);
         xSemaphoreGive(sink->mu);
         if (!n) continue;
         xSemaphoreTake(sink->codec_mu, portMAX_DELAY);
@@ -333,8 +354,11 @@ static void pcm_writer_task(void *arg)
             int64_t t0 = esp_timer_get_time();
             int rc = esp_codec_dev_write(s_speaker, chunk, (int)n);
             radio_diag_codec((uint32_t)((esp_timer_get_time() - t0) / 1000));
+            radio_diag_i2s_result(rc == ESP_CODEC_DEV_OK);
             if (rc != ESP_CODEC_DEV_OK) atomic_store(&sink->failed, true);
             else radio_diag_audio_written();
+            if ((++writer_calls & 127U) == 0)
+                radio_diag_writer_stack((uint32_t)uxTaskGetStackHighWaterMark(NULL));
         }
         xSemaphoreGive(sink->codec_mu);
     }
@@ -343,10 +367,12 @@ static void pcm_writer_task(void *arg)
 }
 
 /* Blocks while the ring is full: the decoder is paced by the writer. */
-static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len, uint32_t revision)
+static bool sink_push(pcm_sink_t *sink, const uint8_t *data, size_t len,
+                      uint32_t revision, bool test_tone)
 {
     while (len) {
-        if (!wanted(revision) || atomic_load(&sink->failed)) return false;
+        bool active = test_tone ? radio_lab_mode() == RADIO_LAB_PCM_TONE : wanted(revision);
+        if (!active || atomic_load(&sink->failed)) return false;
         xSemaphoreTake(sink->mu, portMAX_DELAY);
         size_t w = audio_ring_write(&sink->ring, data, len);
         xSemaphoreGive(sink->mu);
@@ -438,6 +464,7 @@ static void play_stream(const char *url, uint32_t revision)
     }
 
     audio_ring_init(&sink.ring, sink.storage, PCM_RING_BYTES);
+    radio_diag_pcm(0, PCM_RING_BYTES);
     if (xTaskCreatePinnedToCore(pcm_writer_task, "radio_i2s", 4096, &sink,
                                 RADIO_I2S_PRIORITY, NULL, RADIO_AUDIO_CORE) != pdPASS) {
         status_set("Zu wenig RAM fuer Audio");
@@ -638,7 +665,7 @@ static void play_stream(const char *url, uint32_t revision)
                                              (int32_t)frame[i * 2 + 1]) / 2);
                     }
                 }
-                if (!sink_push(&sink, pcm, samples * sizeof(int16_t), revision)) {
+                if (!sink_push(&sink, pcm, samples * sizeof(int16_t), revision, false)) {
                     if (atomic_load(&sink.failed)) status_set("Audioausgabe fehlgeschlagen");
                     goto done;
                 }
@@ -675,6 +702,7 @@ done:
         xSemaphoreTake(sink.finished, portMAX_DELAY);
         ESP_LOGI(TAG, "PCM-Unterlaeufe: %u", (unsigned)atomic_load(&sink.underruns));
     }
+    radio_diag_pcm(0, 0);
     if (opened) esp_codec_dev_close(s_speaker);
     if (decoder) esp_audio_simple_dec_close(decoder);
     esp_http_client_cleanup(http);
@@ -689,14 +717,125 @@ done:
     heap_caps_free(pcm);
 }
 
+
+/* Two strictly isolated audio tests:
+ * direct: generated 1kHz tone -> codec/I2S (no Wi-Fi, no decoder, no PCM ring)
+ * pcm: generated tone -> PSRAM PCM ring -> same I2S writer as radio.
+ * The existing radio_audio task executes test control, so ownership of the
+ * codec remains exclusive across mode transitions. */
+static const int16_t s_test_sine44[44] = {0, 384, 761, 1122, 1460, 1768, 2041, 2271, 2456, 2591, 2673, 2700, 2673, 2591, 2456, 2271, 2041, 1768, 1460, 1122, 761, 384, 0, -384, -761, -1122, -1460, -1768, -2041, -2271, -2456, -2591, -2673, -2700, -2673, -2591, -2456, -2271, -2041, -1768, -1460, -1122, -761, -384};
+
+static void test_tone_play(int mode)
+{
+    if (mode != RADIO_LAB_DIRECT_TONE && mode != RADIO_LAB_PCM_TONE) return;
+    status_set(mode == RADIO_LAB_DIRECT_TONE ? "TEST: Ton direkt an I2S" :
+                                                 "TEST: Ton ueber PCM-Puffer");
+    radio_diag_fifo(0, 0);
+    radio_diag_pcm(0, 0);
+    esp_codec_dev_sample_info_t fmt = {
+        .sample_rate = 44100, .channel = 1, .bits_per_sample = 16,
+    };
+    if (esp_codec_dev_open(s_speaker, &fmt) != ESP_CODEC_DEV_OK) {
+        status_set("TEST: Codec konnte nicht geoeffnet werden");
+        return;
+    }
+    /* The diagnostic sine has a low PCM amplitude to avoid clipping. */
+    uint8_t initial_volume = radio_config_get_volume();
+    esp_codec_dev_set_out_vol(s_speaker, initial_volume);
+    pcm_sink_t sink = {0};
+    if (mode == RADIO_LAB_PCM_TONE) {
+        atomic_init(&sink.stop, false);
+        atomic_init(&sink.codec_open, true);
+        atomic_init(&sink.flushing, false);
+        atomic_init(&sink.failed, false);
+        atomic_init(&sink.underruns, 0);
+        sink.mu = xSemaphoreCreateMutex();
+        sink.codec_mu = xSemaphoreCreateMutex();
+        sink.finished = xSemaphoreCreateBinary();
+        sink.storage = heap_caps_malloc(PCM_RING_BYTES,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!sink.mu || !sink.codec_mu || !sink.finished || !sink.storage) {
+            status_set("TEST: Zu wenig RAM fuer PCM-Ring");
+            goto finish;
+        }
+        audio_ring_init(&sink.ring, sink.storage, PCM_RING_BYTES);
+        radio_diag_pcm(0, PCM_RING_BYTES);
+        if (xTaskCreatePinnedToCore(pcm_writer_task, "radio_i2s", 4096, &sink,
+                                    RADIO_I2S_PRIORITY, NULL, RADIO_AUDIO_CORE) != pdPASS) {
+            status_set("TEST: I2S-Task konnte nicht starten");
+            goto finish;
+        }
+        sink.task_started = true;
+    }
+    uint8_t tone_chunk[PCM_WRITE_CHUNK];
+    uint32_t phase = 0;
+    int64_t next_direct_us = esp_timer_get_time();
+    while (radio_lab_mode() == mode) {
+        uint8_t volume = radio_config_get_volume();
+        if (volume != initial_volume) {
+            if (sink.task_started) xSemaphoreTake(sink.codec_mu, portMAX_DELAY);
+            esp_codec_dev_set_out_vol(s_speaker, volume);
+            if (sink.task_started) xSemaphoreGive(sink.codec_mu);
+            initial_volume = volume;
+        }
+        int16_t *samples = (int16_t *)tone_chunk;
+        for (size_t i = 0; i < sizeof(tone_chunk) / sizeof(int16_t); ++i) {
+            samples[i] = s_test_sine44[phase];
+            phase = (phase + 1) % 44;
+        }
+        if (mode == RADIO_LAB_PCM_TONE) {
+            if (!sink_push(&sink, tone_chunk, sizeof(tone_chunk), 0, true)) {
+                if (atomic_load(&sink.failed)) status_set("TEST: I2S-Schreibfehler");
+                break;
+            }
+        } else {
+            int64_t started = esp_timer_get_time();
+            int rc = esp_codec_dev_write(s_speaker, tone_chunk, sizeof(tone_chunk));
+            radio_diag_codec((uint32_t)((esp_timer_get_time() - started) / 1000));
+            radio_diag_i2s_result(rc == ESP_CODEC_DEV_OK);
+            if (rc != ESP_CODEC_DEV_OK) {
+                status_set("TEST: I2S-Schreibfehler");
+                break;
+            }
+            radio_diag_audio_written();
+            /* Limit the generated stream to exactly the audio sample rate
+             * even if the codec write completes before hardware DMA. */
+            next_direct_us += 1000000LL * (sizeof(tone_chunk) / sizeof(int16_t)) / 44100LL;
+            int64_t remaining = next_direct_us - esp_timer_get_time();
+            if (remaining > 2000)
+                vTaskDelay(pdMS_TO_TICKS((uint32_t)(remaining / 1000)));
+            else if (remaining < -500000)
+                next_direct_us = esp_timer_get_time();
+        }
+    }
+
+finish:
+    if (sink.task_started) {
+        atomic_store(&sink.stop, true);
+        xSemaphoreTake(sink.finished, portMAX_DELAY);
+    }
+    radio_diag_pcm(0, 0);
+    esp_codec_dev_close(s_speaker);
+    if (sink.finished) vSemaphoreDelete(sink.finished);
+    if (sink.codec_mu) vSemaphoreDelete(sink.codec_mu);
+    if (sink.mu) vSemaphoreDelete(sink.mu);
+    heap_caps_free(sink.storage);
+}
+
 static void stream_task(void *arg)
 {
     (void)arg;
-    while (!radio_wifi_connected()) {
+    while (!radio_wifi_connected() && radio_lab_mode() == RADIO_LAB_RADIO) {
         status_set("WLAN einrichten: 192.168.4.1");
         vTaskDelay(pdMS_TO_TICKS(750));
     }
     while (1) {
+        int mode = radio_lab_mode();
+        if (mode != RADIO_LAB_RADIO) {
+            test_tone_play(mode);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         radio_settings_t cfg;
         radio_config_get(&cfg);
         if (!radio_wifi_connected()) {
@@ -717,7 +856,7 @@ static void stream_task(void *arg)
         uint32_t revision = radio_config_revision();
         status_set("Verbinde mit Sender ...");
         play_stream(cfg.stations[cfg.station].url, revision);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(radio_lab_mode() == RADIO_LAB_RADIO ? 1500 : 100));
     }
 }
 

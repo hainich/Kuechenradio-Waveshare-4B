@@ -4,6 +4,7 @@
 #include "radio_stream.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 #include "bsp/esp32_s3_touch_lcd_4b.h"
@@ -24,6 +25,22 @@ static lv_obj_t *s_play_label;
 static int s_selected = -1;
 static bool s_playing = true;
 static uint32_t s_last_rev;
+static atomic_uint s_ui_interval_ms = ATOMIC_VAR_INIT(1000);
+static lv_timer_t *s_refresh_timer;
+
+bool radio_ui_interval_set(uint32_t ms)
+{
+    if (ms != 500 && ms != 1000 && ms != 2000) return false;
+    atomic_store(&s_ui_interval_ms, ms);
+    return true;
+}
+uint32_t radio_ui_interval_get(void) { return atomic_load(&s_ui_interval_ms); }
+
+static void touch_down(lv_event_t *ev)
+{
+    radio_diag_touch_press((int)(intptr_t)lv_event_get_user_data(ev));
+}
+
 
 static void preset_click(lv_event_t *event)
 {
@@ -71,6 +88,9 @@ static void refresh(lv_timer_t *timer)
 {
     (void)timer;
     radio_diag_ui_tick();
+    uint32_t wanted_ms = radio_ui_interval_get();
+    if (s_refresh_timer && lv_timer_get_period(s_refresh_timer) != wanted_ms)
+        lv_timer_set_period(s_refresh_timer, wanted_ms);
     radio_settings_t cfg;
     radio_config_get(&cfg);
     if (s_last_rev != radio_config_revision()) {
@@ -166,6 +186,7 @@ void radio_ui_start(void)
         lv_obj_set_style_radius(s_btn[i], 13, 0);
         station_color(i, false);
         lv_obj_add_event_cb(s_btn[i], preset_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(s_btn[i], touch_down, LV_EVENT_PRESSED, (void *)(intptr_t)(100+i));
         s_label[i] = lv_label_create(s_btn[i]);
         lv_obj_set_width(s_label[i], 190);
         lv_label_set_long_mode(s_label[i], LV_LABEL_LONG_MODE_DOTS);
@@ -184,6 +205,7 @@ void radio_ui_start(void)
     lv_slider_set_range(s_slider, 0, 100);
     lv_obj_add_event_cb(s_slider, slider_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_slider, slider_event, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_slider, touch_down, LV_EVENT_PRESSED, (void *)(intptr_t)200);
     lv_obj_set_style_bg_color(s_slider, lv_color_hex(0x233449), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_slider, lv_color_hex(0x14B8A6), LV_PART_INDICATOR);
     s_play = lv_button_create(screen);
@@ -192,6 +214,7 @@ void radio_ui_start(void)
     lv_obj_set_style_radius(s_play, 12, 0);
     lv_obj_set_style_bg_color(s_play, lv_color_hex(0x0F766E), 0);
     lv_obj_add_event_cb(s_play, play_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_play, touch_down, LV_EVENT_PRESSED, (void *)(intptr_t)300);
     s_play_label = lv_label_create(s_play);
     lv_label_set_text(s_play_label, "II");
     lv_obj_center(s_play_label);
@@ -203,7 +226,7 @@ void radio_ui_start(void)
     lv_label_set_text(s_play_label, cfg.playing ? "II" : ">");
     s_last_rev = 0;
     refresh(NULL);
-    lv_timer_create(refresh, 1000, NULL);
+    s_refresh_timer = lv_timer_create(refresh, 1000, NULL);
     radio_power_button_init();
     lv_timer_create(power_button_check, 250, NULL);
     bsp_display_unlock();

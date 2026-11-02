@@ -19,7 +19,7 @@ if(NOT EXISTS "${MINIMP3_H}")
 endif()
 
 idf_component_register(
-    SRCS "main.c" "radio_config.c" "radio_stream.c" "radio_wifi.c" "radio_web.c" "radio_ui.c" "radio_diag.c" "radio_power_button.c" "url_codec.c"
+    SRCS "main.c" "radio_config.c" "radio_stream.c" "radio_wifi.c" "radio_web.c" "radio_lab_web.c" "radio_ui.c" "radio_diag.c" "radio_power_button.c" "url_codec.c"
     INCLUDE_DIRS "." "vendor"
     REQUIRES esp_audio_codec esp_timer esp_driver_i2c nvs_flash esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls mbedtls lwip
 )

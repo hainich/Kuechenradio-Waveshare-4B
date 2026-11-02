@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #define RADIO_DIAG_HISTORY 48
 
@@ -24,7 +25,11 @@ typedef enum {
     RD_AUDIO_DIRECT,
     RD_AUDIO_FIFO_INTERNAL,
     RD_AUDIO_FIFO_PSRAM,
-    RD_NVS_UI_SAVE
+    RD_NVS_UI_SAVE,
+    RD_PCM_EMPTY,
+    RD_TOUCH_PRESS,
+    RD_USER_MARK,
+    RD_I2S_WRITE_ERROR
 } radio_diag_kind_t;
 
 typedef struct {
@@ -65,6 +70,18 @@ typedef struct {
     uint32_t wifi_disconnects;
     uint32_t stream_starts;
     uint32_t stream_ends;
+    uint32_t pcm_capacity;
+    uint32_t pcm_bytes;
+    uint32_t pcm_min_bytes;
+    uint32_t pcm_max_bytes;
+    uint32_t pcm_underruns;
+    uint32_t pcm_near_touch;
+    uint32_t i2s_write_calls;
+    uint32_t i2s_write_errors;
+    uint32_t i2s_stack_min_bytes;
+    uint32_t last_touch_ms;
+    uint32_t touch_presses;
+    uint32_t marks;
     uint32_t event_count;
     radio_diag_event_t events[RADIO_DIAG_HISTORY]; /* newest first */
 } radio_diag_snapshot_t;
@@ -78,3 +95,23 @@ void radio_diag_ui_tick(void);
 void radio_diag_fifo(uint32_t used, uint32_t capacity);
 void radio_diag_snapshot(radio_diag_snapshot_t *out);
 const char *radio_diag_name(radio_diag_kind_t kind);
+
+/* One sample per second, recorded independently of the browser's presence. */
+#define RADIO_DIAG_SAMPLES 120
+typedef struct {
+    uint32_t ms;
+    uint32_t pcm_bytes;
+    uint32_t http_bytes;
+    uint32_t pcm_underruns;
+    uint32_t touch_presses;
+    uint32_t internal_free;
+} radio_diag_sample_t;
+
+void radio_diag_pcm(uint32_t used, uint32_t capacity);
+void radio_diag_pcm_underrun(void);
+void radio_diag_i2s_result(bool ok);
+void radio_diag_writer_stack(uint32_t remaining_bytes);
+void radio_diag_touch_press(int control);
+void radio_diag_mark(void);
+void radio_diag_sample(void);
+size_t radio_diag_history(radio_diag_sample_t *out, size_t capacity);

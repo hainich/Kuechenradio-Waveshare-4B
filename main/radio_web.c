@@ -3,6 +3,8 @@
 #include "radio_wifi.h"
 #include "radio_diag.h"
 #include "radio_power_button.h"
+#include "radio_lab_web.h"
+#include "radio_stream.h"
 #include "esp_heap_caps.h"
 #include "url_codec.h"
 #include <stdio.h>
@@ -79,7 +81,8 @@ static esp_err_t home_get(httpd_req_t *req)
         ADD("\"></div>");
     }
     ADD("<button type='submit'>Speichern und neu starten</button></form>"
-        "<p><a style='color:#67e8f9' href='/diagnose'>Diagnosebericht ansehen</a></p>"
+        "<p><a style='color:#67e8f9' href='/lab'>Diagnoselabor #65 oeffnen</a></p>"
+        "<p><a style='color:#67e8f9' href='/diagnose'>Textdiagnose ansehen</a></p>"
         "<small>Setup-WLAN: Kuechenradio-Setup / Passwort: Kuechenradio123. "
         "Einstellungen im Heimnetz ueber die IP-Adresse des Displays.</small></body></html>");
 
@@ -170,7 +173,18 @@ static esp_err_t diagnose_get(httpd_req_t *req)
     if (n < 0 || (size_t)n >= capacity - used) goto diagnose_full; \
     used += (size_t)n; \
 } while (0)
-    REPORT("KUECHENRADIO DIAGNOSE / Build #61 Touch-Audio-Persistenz\n");
+    REPORT("KUECHENRADIO DIAGNOSE / Build #65 Messlabor\n");
+    REPORT("Web-Diagnoselabor: http://<RADIO-IP>/lab | CSV: /lab/csv\n");
+    REPORT("Modus: %d (0=Radio, 1=Testton direkt, 2=Testton PCM) | PCM-Start: %lu KB\n",
+           radio_lab_mode(), (unsigned long)radio_lab_prime_kb());
+    REPORT("PCM aktuell %lu/%lu B, Min %lu B, Max %lu B | PCM-Ring-Leerlaeufe %lu (bis 1s nach Touch: %lu)\n",
+           (unsigned long)d.pcm_bytes, (unsigned long)d.pcm_capacity,
+           (unsigned long)d.pcm_min_bytes, (unsigned long)d.pcm_max_bytes,
+           (unsigned long)d.pcm_underruns, (unsigned long)d.pcm_near_touch);
+    REPORT("I2S Writes %lu, Fehler %lu, Writer-Stackreserve %lu B | Touch-PRESS %lu, manuelle Stoerungsmarken %lu\n",
+           (unsigned long)d.i2s_write_calls, (unsigned long)d.i2s_write_errors,
+           (unsigned long)d.i2s_stack_min_bytes, (unsigned long)d.touch_presses,
+           (unsigned long)d.marks);
     REPORT("Physische PWR-Taste: %s\n", radio_power_button_status());
     REPORT("Uptime: %lu s | Resetgrund: %d | WLAN verbunden: %s\n",
            (unsigned long)(d.uptime_ms / 1000), (int)esp_reset_reason(),
@@ -232,7 +246,7 @@ void radio_web_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 4;
+    cfg.max_uri_handlers = 10;
     cfg.recv_wait_timeout = 6;
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -245,6 +259,11 @@ void radio_web_start(void)
     httpd_register_uri_handler(server, &save);
     httpd_uri_t diag = {.uri = "/diagnose", .method = HTTP_GET, .handler = diagnose_get};
     httpd_register_uri_handler(server, &diag);
-    ESP_LOGI(TAG, "Diagnose: http://<radio-ip>/diagnose"); 
+    esp_err_t lab_err = radio_lab_web_register(server);
+    if (lab_err != ESP_OK)
+        ESP_LOGE(TAG, "Diagnoselabor konnte nicht registriert werden: %s",
+                 esp_err_to_name(lab_err));
+    ESP_LOGI(TAG, "Diagnose: http://<radio-ip>/diagnose");
+    ESP_LOGI(TAG, "Messlabor: http://<radio-ip>/lab"); 
     ESP_LOGI(TAG, "Konfiguration: http://192.168.4.1/ oder http://<radio-ip>/");
 }
