@@ -37,10 +37,18 @@ static atomic_uint s_heap_fail_internal_count;
 static atomic_uint s_heap_fail_last_size;
 static atomic_uint s_heap_fail_last_caps;
 static atomic_uint s_heap_fail_last_ms;
+static atomic_uint s_heap_fail_function_hash;
 static uint32_t s_heap_fail_seen;
 static void on_alloc_failed(size_t size, uint32_t caps, const char *function_name)
 {
-    (void)function_name;
+    /* FNV-1a: bounded work, no allocation or logging inside heap hook. */
+    uint32_t hash = 2166136261u;
+    if (function_name) {
+        for (unsigned i = 0; i < 48 && function_name[i]; ++i) {
+            hash = (hash ^ (uint8_t)function_name[i]) * 16777619u;
+        }
+    }
+    atomic_store(&s_heap_fail_function_hash, hash);
     atomic_fetch_add(&s_heap_fail_count, 1);
     if (caps & MALLOC_CAP_INTERNAL) atomic_fetch_add(&s_heap_fail_internal_count, 1);
     atomic_store(&s_heap_fail_last_size, (uint32_t)size);
@@ -362,6 +370,7 @@ void radio_diag_sample(void)
     uint32_t fail_size = atomic_load(&s_heap_fail_last_size);
     uint32_t fail_caps = atomic_load(&s_heap_fail_last_caps);
     uint32_t fail_time = atomic_load(&s_heap_fail_last_ms);
+    uint32_t fail_function_hash = atomic_load(&s_heap_fail_function_hash);
     uint32_t now = ms_now();
     bool report_http_gap = false;
     uint32_t gap_value = 0;
@@ -388,6 +397,7 @@ void radio_diag_sample(void)
     s_diag.heap_alloc_fail_last_bytes = fail_size;
     s_diag.heap_alloc_fail_last_caps = fail_caps;
     s_diag.heap_alloc_fail_last_ms = fail_time;
+    s_diag.heap_alloc_fail_function_hash = fail_function_hash;
     if (!s_diag.heap_internal_min_bytes || free_internal < s_diag.heap_internal_min_bytes)
         s_diag.heap_internal_min_bytes = free_internal;
     if (!s_diag.heap_internal_largest_min_bytes || largest_internal < s_diag.heap_internal_largest_min_bytes)
