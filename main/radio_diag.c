@@ -558,6 +558,7 @@ void radio_diag_live_snapshot(radio_diag_snapshot_t *out)
     out->heap_alloc_fail_last_bytes = atomic_load(&s_heap_fail_last_size);
     out->heap_alloc_fail_last_caps = atomic_load(&s_heap_fail_last_caps);
     out->heap_alloc_fail_last_ms = atomic_load(&s_heap_fail_last_ms);
+    out->heap_alloc_fail_function_hash = atomic_load(&s_heap_fail_function_hash);
 }
 
 void radio_diag_pcm_push_wait(uint32_t ms)
