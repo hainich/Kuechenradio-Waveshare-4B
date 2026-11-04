@@ -458,7 +458,9 @@ static void play_stream(const char *url, uint32_t revision, uint32_t station)
      * stereo PCM here; downmix it IN PLACE before sending it to I2S. This
      * eliminates the second 16-KiB PSRAM workspace and the memcpy of every
      * decoded mono frame, both competing with RGB LCD DMA bandwidth. */
-    uint8_t *encoded = malloc(AUDIO_READ_SIZE);
+    /* Compressed input does not require DMA-capable internal RAM. */
+    uint8_t *encoded = heap_caps_malloc(AUDIO_READ_SIZE,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *pcm = heap_caps_malloc(AUDIO_PCM_CAPACITY,
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint32_t pcm_capacity = AUDIO_PCM_CAPACITY;
