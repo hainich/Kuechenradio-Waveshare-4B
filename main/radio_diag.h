@@ -197,6 +197,9 @@ typedef struct {
     uint32_t internal_free;
     uint32_t internal_largest;
     uint32_t psram_free;
+    uint32_t internal_dma_free;
+    uint32_t internal_dma_largest;
+    uint32_t internal_32bit_free;
     uint32_t heap_fail_count;
     uint32_t decoder_gap_max_ms;
     uint32_t web_max_ms;
