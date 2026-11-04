@@ -396,6 +396,10 @@ void radio_diag_sample(void)
     s->internal_dma_largest = dma_largest;
     s->internal_32bit_free = internal_32bit;
     s->heap_fail_count = fail_count;
+    s->heap_fail_last_size = fail_size;
+    s->heap_fail_last_caps = fail_caps;
+    s->heap_fail_function_hash = fail_function_hash;
+    s->heap_fail_internal_count = fail_internal;
     s->decoder_gap_max_ms = s_diag.decoder_gap_max_ms;
     s->web_max_ms = s_diag.web_page_max_ms > s_diag.web_state_max_ms ? s_diag.web_page_max_ms : s_diag.web_state_max_ms;
     s_diag.heap_alloc_fail_count = fail_count;
