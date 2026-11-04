@@ -201,6 +201,10 @@ typedef struct {
     uint32_t internal_dma_largest;
     uint32_t internal_32bit_free;
     uint32_t heap_fail_count;
+    uint32_t heap_fail_last_size;
+    uint32_t heap_fail_last_caps;
+    uint32_t heap_fail_function_hash;
+    uint32_t heap_fail_internal_count;
     uint32_t decoder_gap_max_ms;
     uint32_t web_max_ms;
     uint32_t audio_stack_free;
