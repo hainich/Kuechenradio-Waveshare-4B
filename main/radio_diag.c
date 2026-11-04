@@ -365,6 +365,9 @@ void radio_diag_sample(void)
     uint32_t free_internal = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     uint32_t largest_internal = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     uint32_t free_psram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint32_t dma_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint32_t dma_largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint32_t internal_32bit = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_32BIT);
     uint32_t fail_count = atomic_load(&s_heap_fail_count);
     uint32_t fail_internal = atomic_load(&s_heap_fail_internal_count);
     uint32_t fail_size = atomic_load(&s_heap_fail_last_size);
@@ -389,6 +392,9 @@ void radio_diag_sample(void)
     s->internal_free = free_internal;
     s->internal_largest = largest_internal;
     s->psram_free = free_psram;
+    s->internal_dma_free = dma_free;
+    s->internal_dma_largest = dma_largest;
+    s->internal_32bit_free = internal_32bit;
     s->heap_fail_count = fail_count;
     s->decoder_gap_max_ms = s_diag.decoder_gap_max_ms;
     s->web_max_ms = s_diag.web_page_max_ms > s_diag.web_state_max_ms ? s_diag.web_page_max_ms : s_diag.web_state_max_ms;
