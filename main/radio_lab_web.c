@@ -434,7 +434,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
     for (size_t i = 0; i < ev_count && err == ESP_OK; ++i) {
         const radio_diag_event_t *e = &events[i];
         int n = snprintf(row, sizeof(row),
-            "event;%lu;;;;;;;;;;;;;;;;;;;;%s;%lu;%d;%lu;%lu;%ld;%ld;%ld;;;\n",
+            "event;%lu;;;;;;;;;;;;;;;;;;;;%s;%lu;%d;%lu;%lu;%ld;%ld;%ld;;;;;;\n",
             (unsigned long)e->ms, radio_diag_name((radio_diag_kind_t)e->kind),
             (unsigned long)e->value, (int)e->aux,
             (unsigned long)e->pcm_bytes,(unsigned long)e->fifo_bytes,
