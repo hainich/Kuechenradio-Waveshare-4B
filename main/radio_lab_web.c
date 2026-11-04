@@ -17,7 +17,7 @@
 static const char LAB_PAGE[] =
 "<!doctype html>\n"
 "<html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-"<title>Küchenradio · Diagnose #70</title>\n"
+"<title>Küchenradio · Diagnose #72</title>\n"
 "<style>\n"
 ":root{font-family:system-ui,sans-serif;color-scheme:dark;background:#0b1422;color:#e5edf5}\n"
 "body{max-width:860px;margin:auto;padding:12px}\n"
@@ -385,7 +385,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
     size_t ev_count = radio_diag_extended_events(events, RADIO_DIAG_EXT_EVENTS);
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Disposition",
-                       "attachment; filename=kuechenradio70_diagnose.csv");
+                       "attachment; filename=kuechenradio72_diagnose.csv");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     const char *header =
         "typ;zeit_ms;pcm_bytes;fifo_bytes;http_bytes;http_alter_ms;http_read_ms;"
@@ -396,7 +396,8 @@ static esp_err_t lab_csv(httpd_req_t *req)
         "ereignis;wert;zusatz;event_pcm;event_fifo;event_http_alter_ms;"
         "event_audio_alter_ms;event_lvgl_alter_ms;"
         "heap_fehler_gesamt;decoder_abstand_max_ms;web_antwort_max_ms;"
-        "dma_frei_bytes;dma_groesster_block;intern_32bit_frei_bytes\n";
+        "dma_frei_bytes;dma_groesster_block;intern_32bit_frei_bytes;"
+        "heap_letzte_bytes;heap_letzte_caps;heap_funktion_hash;heap_intern_fehler\n";
     esp_err_t err = httpd_resp_send_chunk(req, header, HTTPD_RESP_USE_STRLEN);
     size_t used = 0;
     char row[300];
@@ -404,7 +405,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
         const radio_diag_sample_t *s = &samples[i];
         int n = snprintf(row, sizeof(row),
             "sample;%lu;%lu;%lu;%lu;%ld;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu;"
-            "%d;%u;%u;%lu;%lu;%lu;%u;;;;;;;;;%lu;%lu;%lu;%lu;%lu;%lu\n",
+            "%d;%u;%u;%lu;%lu;%lu;%u;;;;;;;;;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu\n",
             (unsigned long)s->ms,(unsigned long)s->pcm_bytes,
             (unsigned long)s->fifo_bytes,(unsigned long)s->http_bytes,
             s->http_age_ms == UINT32_MAX ? -1L : (long)s->http_age_ms,
@@ -421,7 +422,11 @@ static esp_err_t lab_csv(httpd_req_t *req)
             (unsigned long)s->web_max_ms,
             (unsigned long)s->internal_dma_free,
             (unsigned long)s->internal_dma_largest,
-            (unsigned long)s->internal_32bit_free);
+            (unsigned long)s->internal_32bit_free,
+            (unsigned long)s->heap_fail_last_size,
+            (unsigned long)s->heap_fail_last_caps,
+            (unsigned long)s->heap_fail_function_hash,
+            (unsigned long)s->heap_fail_internal_count);
         if (n < 0 || n >= (int)sizeof(row)) { err = ESP_FAIL; break; }
         if (used + n >= 4096) {
             err = httpd_resp_send_chunk(req, chunk, used);
@@ -434,7 +439,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
     for (size_t i = 0; i < ev_count && err == ESP_OK; ++i) {
         const radio_diag_event_t *e = &events[i];
         int n = snprintf(row, sizeof(row),
-            "event;%lu;;;;;;;;;;;;;;;;;;;;%s;%lu;%d;%lu;%lu;%ld;%ld;%ld;;;;;;\n",
+            "event;%lu;;;;;;;;;;;;;;;;;;;;%s;%lu;%d;%lu;%lu;%ld;%ld;%ld;;;;;;;;;;\n",
             (unsigned long)e->ms, radio_diag_name((radio_diag_kind_t)e->kind),
             (unsigned long)e->value, (int)e->aux,
             (unsigned long)e->pcm_bytes,(unsigned long)e->fifo_bytes,
