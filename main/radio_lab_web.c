@@ -17,7 +17,7 @@
 static const char LAB_PAGE[] =
 "<!doctype html>\n"
 "<html lang=\"de\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-"<title>Küchenradio · Diagnose #69</title>\n"
+"<title>Küchenradio · Diagnose #70</title>\n"
 "<style>\n"
 ":root{font-family:system-ui,sans-serif;color-scheme:dark;background:#0b1422;color:#e5edf5}\n"
 "body{max-width:860px;margin:auto;padding:12px}\n"
@@ -33,7 +33,7 @@ static const char LAB_PAGE[] =
 "select{width:100%}canvas{display:block;width:100%;height:145px;background:#07131f;margin:10px 0}\n"
 "#message{min-height:22px;border-left:3px solid #2dd4bf;padding:6px 10px;color:#c8eef0}\n"
 "</style></head><body>\n"
-"<h1>Küchenradio · Diagnose #69</h1>\n"
+"<h1>Küchenradio · Diagnose #70</h1>\n"
 "<p><a href=\"/\">Sendereinstellungen</a> · <a href=\"/lab/csv\">30-Minuten-Protokoll (CSV)</a> · <a href=\"/diagnose\">Textbericht</a></p>\n"
 "<section>\n"
 "<h2>Störung unmittelbar markieren</h2>\n"
@@ -385,7 +385,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
     size_t ev_count = radio_diag_extended_events(events, RADIO_DIAG_EXT_EVENTS);
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Disposition",
-                       "attachment; filename=kuechenradio67_diagnose.csv");
+                       "attachment; filename=kuechenradio70_diagnose.csv");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     const char *header =
         "typ;zeit_ms;pcm_bytes;fifo_bytes;http_bytes;http_alter_ms;http_read_ms;"
@@ -395,7 +395,8 @@ static esp_err_t lab_csv(httpd_req_t *req)
         "audio_stack_frei;http_stack_frei;i2s_stack_frei;modus;"
         "ereignis;wert;zusatz;event_pcm;event_fifo;event_http_alter_ms;"
         "event_audio_alter_ms;event_lvgl_alter_ms;"
-        "heap_fehler_gesamt;decoder_abstand_max_ms;web_antwort_max_ms\n";
+        "heap_fehler_gesamt;decoder_abstand_max_ms;web_antwort_max_ms;"
+        "dma_frei_bytes;dma_groesster_block;intern_32bit_frei_bytes\n";
     esp_err_t err = httpd_resp_send_chunk(req, header, HTTPD_RESP_USE_STRLEN);
     size_t used = 0;
     char row[300];
@@ -403,7 +404,7 @@ static esp_err_t lab_csv(httpd_req_t *req)
         const radio_diag_sample_t *s = &samples[i];
         int n = snprintf(row, sizeof(row),
             "sample;%lu;%lu;%lu;%lu;%ld;%lu;%lu;%lu;%lu;%lu;%lu;%lu;%lu;"
-            "%d;%u;%u;%lu;%lu;%lu;%u;;;;;;;;;%lu;%lu;%lu\n",
+            "%d;%u;%u;%lu;%lu;%lu;%u;;;;;;;;;%lu;%lu;%lu;%lu;%lu;%lu\n",
             (unsigned long)s->ms,(unsigned long)s->pcm_bytes,
             (unsigned long)s->fifo_bytes,(unsigned long)s->http_bytes,
             s->http_age_ms == UINT32_MAX ? -1L : (long)s->http_age_ms,
@@ -417,7 +418,10 @@ static esp_err_t lab_csv(httpd_req_t *req)
             (unsigned long)s->i2s_stack_free,(unsigned)s->mode,
             (unsigned long)s->heap_fail_count,
             (unsigned long)s->decoder_gap_max_ms,
-            (unsigned long)s->web_max_ms);
+            (unsigned long)s->web_max_ms,
+            (unsigned long)s->internal_dma_free,
+            (unsigned long)s->internal_dma_largest,
+            (unsigned long)s->internal_32bit_free);
         if (n < 0 || n >= (int)sizeof(row)) { err = ESP_FAIL; break; }
         if (used + n >= 4096) {
             err = httpd_resp_send_chunk(req, chunk, used);
