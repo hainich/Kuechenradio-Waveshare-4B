@@ -63,7 +63,7 @@ jobs:
           grep -q 'radio_diag_pcm_push_wait' main/radio_stream.c
           grep -q 'radio_diag_codec_mutex_wait' main/radio_stream.c
           grep -q 'lru_purge_enable = true' main/radio_web.c
-          grep -q 'kuechenradio67_diagnose.csv' main/radio_lab_web.c
+          grep -q 'kuechenradio70_diagnose.csv' main/radio_lab_web.c
           grep -q 'esp_audio_dec_register_default' main/radio_stream.c
       - name: Build update and factory images
         run: |
